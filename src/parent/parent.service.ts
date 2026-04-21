@@ -1,0 +1,588 @@
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { EnrollmentStatus, Gender, Prisma, SchoolYearStatus, UserRole } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
+import { BillingService } from '../billing/billing.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { PrismaService } from '../prisma/prisma.service';
+
+type ChildRow = {
+  id: string;
+  parentId: string | null;
+  firstName: string;
+  lastName: string;
+  birthDate: Date | null;
+  gender: Gender;
+  allergies: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+@Injectable()
+export class ParentService {
+  private readonly logger = new Logger(ParentService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly billing: BillingService,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  private async getOpenSchoolYearLabel() {
+    const open = await this.prisma.schoolYear.findFirst({
+      where: { status: SchoolYearStatus.OPEN },
+      orderBy: { startDate: 'desc' },
+    });
+    if (!open) {
+      throw new BadRequestException("Aucune année scolaire ouverte.");
+    }
+    return open.label;
+  }
+
+  /** Objet JSON sérialisable (évite soucis de sérialisation Nest / Prisma). */
+  private toChildResponse(row: ChildRow, childNumber: number | null) {
+    return {
+      id: row.id,
+      parentId: row.parentId,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      birthDate: row.birthDate ? row.birthDate.toISOString() : null,
+      gender: row.gender,
+      allergies: row.allergies,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+      childNumber,
+    };
+  }
+
+  async getMe(userId: string) {
+    let user:
+      | {
+          id: string;
+          email: string;
+          fullName: string | null;
+          profilePhotoUrl: string | null;
+          phone: string | null;
+          role: UserRole;
+        }
+      | null = null;
+    try {
+      user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          profilePhotoUrl: true,
+          phone: true,
+          address: true,
+          role: true,
+        },
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2022') {
+        const legacy = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            id: true,
+            email: true,
+            fullName: true,
+            phone: true,
+            address: true,
+            role: true,
+          },
+        });
+        user = legacy ? { ...legacy, profilePhotoUrl: null } : null;
+      } else {
+        throw e;
+      }
+    }
+    if (!user || user.role !== UserRole.PARENT) {
+      throw new NotFoundException();
+    }
+    return user;
+  }
+
+  async updateMe(userId: string, body: Record<string, unknown>) {
+    const fullName = String(body?.fullName ?? '').trim();
+    const phoneRaw = body?.phone;
+    const phone = phoneRaw === null || phoneRaw === undefined ? null : String(phoneRaw).trim();
+    const addressRaw = body?.address;
+    const address = addressRaw === null || addressRaw === undefined ? null : String(addressRaw).trim();
+    if (!fullName) throw new BadRequestException('Le nom complet est obligatoire.');
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+    if (!user || user.role !== UserRole.PARENT) throw new NotFoundException();
+
+    try {
+      return await this.prisma.user.update({
+        where: { id: userId },
+        data: { fullName, phone: phone || null, address: address || null },
+        select: { id: true, email: true, fullName: true, profilePhotoUrl: true, phone: true, address: true },
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2022') {
+        const updated = await this.prisma.user.update({
+          where: { id: userId },
+          data: { fullName, phone: phone || null, address: address || null },
+          select: { id: true, email: true, fullName: true, phone: true, address: true },
+        });
+        return { ...updated, profilePhotoUrl: null };
+      }
+      throw e;
+    }
+  }
+
+  async updateMePhoto(userId: string, profilePhotoUrl: string) {
+    const url = String(profilePhotoUrl ?? '').trim();
+    if (!url) throw new BadRequestException('URL de photo invalide.');
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+    if (!user || user.role !== UserRole.PARENT) throw new NotFoundException();
+    try {
+      return await this.prisma.user.update({
+        where: { id: userId },
+        data: { profilePhotoUrl: url },
+        select: { id: true, profilePhotoUrl: true },
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2022') {
+        throw new BadRequestException(
+          'La base de données n’est pas à jour pour la photo de profil. Exécutez les migrations Prisma.',
+        );
+      }
+      throw e;
+    }
+  }
+
+  async changePassword(userId: string, body: Record<string, unknown>) {
+    const currentPassword = String(body?.currentPassword ?? '');
+    const newPassword = String(body?.newPassword ?? '');
+    if (!currentPassword || !newPassword) {
+      throw new BadRequestException('Mot de passe actuel et nouveau mot de passe requis.');
+    }
+    if (newPassword.length < 8) {
+      throw new BadRequestException('Le nouveau mot de passe doit contenir au moins 8 caractères.');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, passwordHash: true },
+    });
+    if (!user || user.role !== UserRole.PARENT || !user.passwordHash) {
+      throw new NotFoundException();
+    }
+
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) throw new BadRequestException('Mot de passe actuel incorrect.');
+
+    const nextHash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: nextHash },
+    });
+    return { ok: true };
+  }
+
+  async getChildForParent(parentId: string, childId: string) {
+    const ordered = await this.prisma.child.findMany({
+      where: { parentId },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      select: { id: true },
+    });
+    const idx = ordered.findIndex((c) => c.id === childId);
+    const childNumber = idx >= 0 ? idx + 1 : null;
+
+    const child = await this.prisma.child.findFirst({
+      where: { id: childId, parentId },
+    });
+    if (!child) throw new NotFoundException();
+    return this.toChildResponse(child as ChildRow, childNumber);
+  }
+
+  async updateChild(parentId: string, childId: string, body: Record<string, unknown>) {
+    const existing = await this.prisma.child.findFirst({
+      where: { id: childId, parentId },
+    });
+    if (!existing) throw new NotFoundException();
+
+    const data: {
+      firstName?: string;
+      lastName?: string;
+      birthDate?: Date | null;
+      gender?: Gender;
+      allergies?: string | null;
+    } = {};
+
+    if (body.firstName !== undefined) {
+      const firstName = String(body.firstName ?? '').trim();
+      if (!firstName) throw new BadRequestException('Le prénom est obligatoire');
+      data.firstName = firstName;
+    }
+    if (body.lastName !== undefined) {
+      const lastName = String(body.lastName ?? '').trim();
+      if (!lastName) throw new BadRequestException('Le nom est obligatoire');
+      data.lastName = lastName;
+    }
+    if (body.birthDate !== undefined) {
+      const raw = body.birthDate === null || body.birthDate === '' ? null : String(body.birthDate).trim();
+      if (raw === null || raw === '') {
+        data.birthDate = null;
+      } else {
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime())) {
+          throw new BadRequestException('Date de naissance invalide');
+        }
+        data.birthDate = d;
+      }
+    }
+    if (body.gender !== undefined) {
+      const g = String(body.gender ?? '').toUpperCase();
+      const gender =
+        g === 'FEMALE' || g === 'FILLE'
+          ? Gender.FEMALE
+          : g === 'MALE' || g === 'GARCON' || g === 'GARÇON'
+            ? Gender.MALE
+            : g === 'UNSPECIFIED' || g === '' || g === 'NON_PRECISE'
+              ? Gender.UNSPECIFIED
+              : null;
+      if (gender === null) throw new BadRequestException('Genre invalide');
+      data.gender = gender;
+    }
+    if (body.allergies !== undefined) {
+      const a = body.allergies === null ? '' : String(body.allergies).trim();
+      data.allergies = a || null;
+    }
+
+    if (Object.keys(data).length === 0) {
+      return this.getChildForParent(parentId, childId);
+    }
+
+    try {
+      await this.prisma.child.update({
+        where: { id: childId },
+        data,
+      });
+      return await this.getChildForParent(parentId, childId);
+    } catch (e) {
+      if (e instanceof NotFoundException || e instanceof BadRequestException) throw e;
+      if (e instanceof Prisma.PrismaClientKnownRequestError) {
+        if (e.code === 'P2022') {
+          throw new BadRequestException(
+            'Colonne absente en base : exécutez les migrations Prisma (npx prisma migrate deploy).',
+          );
+        }
+        if (e.code === 'P2025') throw new NotFoundException();
+        this.logger.warn(`Prisma ${e.code}: ${e.message}`);
+        throw new BadRequestException(e.message);
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`updateChild: ${msg}`, e instanceof Error ? e.stack : undefined);
+      const expose =
+        process.env.NODE_ENV !== 'production' || process.env.DEBUG_PARENT === '1';
+      throw new InternalServerErrorException(expose ? msg : 'Mise à jour impossible');
+    }
+  }
+
+  async reenrollChild(parentId: string, childId: string, body: Record<string, unknown>) {
+    const child = await this.prisma.child.findFirst({
+      where: { id: childId, parentId },
+      select: { id: true },
+    });
+    if (!child) throw new NotFoundException();
+
+    const levelId = String(body.levelId ?? '').trim();
+    if (!levelId) throw new BadRequestException('levelId est obligatoire');
+    const classId = body.classId ? String(body.classId).trim() : null;
+    let schoolYear = String(body.schoolYear ?? '').trim();
+    if (!schoolYear) schoolYear = await this.getOpenSchoolYearLabel();
+
+    const open = await this.prisma.schoolYear.findUnique({ where: { label: schoolYear } });
+    if (!open || open.status !== SchoolYearStatus.OPEN) {
+      throw new BadRequestException("L'année scolaire choisie n'est pas ouverte.");
+    }
+
+    const existing = await this.prisma.enrollment.findFirst({
+      where: { childId, schoolYear },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new BadRequestException('Cet enfant est déjà inscrit pour cette année scolaire.');
+    }
+
+    const closedYears = await this.prisma.schoolYear.findMany({
+      where: { status: SchoolYearStatus.CLOSED },
+      select: { label: true },
+    });
+    const closedLabels = closedYears.map((y) => y.label);
+    if (closedLabels.length) {
+      const [unpaidTuition, unpaidMonthly] = await Promise.all([
+        this.prisma.tuitionCharge.count({
+          where: {
+            status: { not: 'PAID' },
+            enrollment: { childId, schoolYear: { in: closedLabels } },
+          },
+        }),
+        this.prisma.monthlyInstallment.count({
+          where: {
+            status: { not: 'PAID' },
+            enrollment: { childId, schoolYear: { in: closedLabels } },
+          },
+        }),
+      ]);
+      if (unpaidTuition > 0 || unpaidMonthly > 0) {
+        throw new BadRequestException(
+          "Réinscription impossible: toutes les factures des années clôturées doivent être réglées.",
+        );
+      }
+    }
+
+    if (classId) {
+      const cls = await this.prisma.classRoom.findFirst({
+        where: { id: classId, levelId },
+        select: { id: true },
+      });
+      if (!cls) throw new BadRequestException('Classe invalide pour le niveau choisi.');
+    }
+
+    return this.prisma.enrollment.create({
+      data: {
+        childId,
+        levelId,
+        classId,
+        schoolYear,
+        status: EnrollmentStatus.PENDING,
+      },
+      include: {
+        child: true,
+        level: true,
+        class: true,
+      },
+    });
+  }
+
+  getOverview(userId: string) {
+    return this.prisma.child.findMany({
+      where: { parentId: userId },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      include: {
+        enrollments: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            level: true,
+            class: true,
+          },
+        },
+      },
+    });
+  }
+
+  async listNotifications(userId: string) {
+    await this.notifications.ensureOverduePaymentNotifications(userId);
+    const items = await this.prisma.notification.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      select: {
+        id: true,
+        title: true,
+        body: true,
+        kind: true,
+        readAt: true,
+        createdAt: true,
+        enrollmentId: true,
+      },
+    });
+    const unreadCount = items.filter((n) => !n.readAt).length;
+    return { items, unreadCount, latest: items[0] ?? null };
+  }
+
+  async markNotificationRead(userId: string, notificationId: string) {
+    const n = await this.prisma.notification.findFirst({
+      where: { id: notificationId, userId },
+    });
+    if (!n) throw new NotFoundException('Notification introuvable');
+    return this.prisma.notification.update({
+      where: { id: notificationId },
+      data: { readAt: new Date() },
+    });
+  }
+
+  async markAllNotificationsRead(userId: string) {
+    await this.prisma.notification.updateMany({
+      where: { userId, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return { ok: true };
+  }
+
+  async listPaymentsOverview(userId: string) {
+    const children = await this.prisma.child.findMany({
+      where: { parentId: userId },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        enrollments: { select: { id: true } },
+      },
+    });
+    const enrollmentIds = [
+      ...new Set(children.flatMap((c) => c.enrollments.map((e) => e.id))),
+    ];
+    const billingContact = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        fullName: true,
+        email: true,
+        phone: true,
+        address: true,
+        parentRelation: true,
+      },
+    });
+
+    if (enrollmentIds.length === 0) {
+      return {
+        billingContact,
+        payments: [],
+        legacyPayments: [],
+        tuitionCharges: [],
+        monthlyInstallments: [],
+        totalPaidCents: 0,
+      };
+    }
+
+    /** Aligner scolarité + mensualités sur le barème actuel (même logique qu’après validation admin). */
+    const approvedEnrollments = await this.prisma.enrollment.findMany({
+      where: { id: { in: enrollmentIds }, status: EnrollmentStatus.APPROVED },
+      select: { id: true },
+    });
+    for (const { id } of approvedEnrollments) {
+      try {
+        await this.billing.syncEnrollmentBilling(id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(`syncEnrollmentBilling(${id}): ${msg}`);
+      }
+    }
+
+    const [legacyPayments, tuitionCharges, monthlyInstallments] = await Promise.all([
+      this.prisma.monthlyPayment.findMany({
+        where: { enrollmentId: { in: enrollmentIds } },
+        orderBy: [{ year: 'desc' }, { month: 'desc' }],
+        include: {
+          enrollment: {
+            select: {
+              id: true,
+              schoolYear: true,
+              createdAt: true,
+              level: { select: { name: true } },
+              child: { select: { firstName: true, lastName: true, allergies: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.tuitionCharge.findMany({
+        where: { enrollmentId: { in: enrollmentIds } },
+        orderBy: { schoolYear: 'desc' },
+        include: {
+          enrollment: {
+            select: {
+              id: true,
+              schoolYear: true,
+              createdAt: true,
+              levelId: true,
+              level: { select: { name: true } },
+              child: { select: { firstName: true, lastName: true, allergies: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.monthlyInstallment.findMany({
+        where: { enrollmentId: { in: enrollmentIds } },
+        orderBy: [{ year: 'desc' }, { month: 'desc' }],
+        include: {
+          enrollment: {
+            select: {
+              id: true,
+              schoolYear: true,
+              createdAt: true,
+              level: { select: { name: true } },
+              child: { select: { firstName: true, lastName: true, allergies: true } },
+            },
+          },
+          lines: true,
+        },
+      }),
+    ]);
+
+    const legacyPaidCents = legacyPayments
+      .filter((p) => p.status === 'PAID')
+      .reduce((sum, p) => sum + p.amountCents, 0);
+    const tuitionPaidCents = tuitionCharges
+      .filter((p) => p.status === 'PAID')
+      .reduce((sum, p) => sum + p.amountCents, 0);
+    const monthlyPaidCents = monthlyInstallments
+      .filter((p) => p.status === 'PAID')
+      .reduce((sum, p) => sum + p.totalAmountCents, 0);
+
+    return {
+      billingContact,
+      legacyPayments,
+      tuitionCharges,
+      monthlyInstallments,
+      totalPaidCents: legacyPaidCents + tuitionPaidCents + monthlyPaidCents,
+    };
+  }
+
+  async listLevelDocuments(userId: string) {
+    const children = await this.prisma.child.findMany({
+      where: { parentId: userId },
+      include: {
+        enrollments: { select: { levelId: true } },
+      },
+    });
+    const levelIds = [
+      ...new Set(children.flatMap((c) => c.enrollments.map((e) => e.levelId))),
+    ];
+
+    const seen = new Set<string>();
+    const out: { id: string; title: string; url: string; kind: 'SCHOOL' | 'ADMIN' }[] = [];
+
+    const globalDocs = await this.prisma.document.findMany({
+      where: { published: true, levels: { none: {} } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, title: true, url: true, kind: true },
+    });
+    for (const d of globalDocs) {
+      seen.add(d.id);
+      out.push({ id: d.id, title: d.title, url: d.url, kind: d.kind });
+    }
+
+    if (levelIds.length > 0) {
+      const rows = await this.prisma.levelDocument.findMany({
+        where: { levelId: { in: levelIds }, document: { published: true } },
+        include: {
+          document: { select: { id: true, title: true, url: true, kind: true } },
+        },
+      });
+      for (const row of rows) {
+        if (seen.has(row.documentId)) continue;
+        seen.add(row.documentId);
+        const d = row.document;
+        out.push({ id: d.id, title: d.title, url: d.url, kind: d.kind });
+      }
+    }
+
+    return out;
+  }
+}

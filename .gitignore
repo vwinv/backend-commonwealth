@@ -1,0 +1,41 @@
+# Dependencies
+node_modules
+
+# Build Nest
+dist
+build
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env (ne pas versionner les secrets)
+.env
+.env.*
+!.env.example
+
+# Prisma (sortie client générée hors défaut si configuré ainsi)
+/generated/prisma
+
+# Tests & couverture
+coverage
+.nyc_output
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / éditeurs
+.idea
+*.swp
+*.swo
+
+# Fichiers uploadés (admin documents)
+uploads/
+
+# Debug
+*.pid

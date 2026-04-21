@@ -1,0 +1,365 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  PARENT
+  ADMIN
+  STAFF
+}
+
+enum EnrollmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+}
+
+enum SchoolYearStatus {
+  OPEN
+  CLOSED
+}
+
+enum DocumentKind {
+  SCHOOL
+  ADMIN
+}
+
+/// Ligne de facture mensuelle : base (mensualité) ou option (service).
+enum MonthlyBillingLineKind {
+  MONTHLY_BASE
+  SERVICE
+}
+
+enum Gender {
+  FEMALE
+  MALE
+  UNSPECIFIED
+}
+
+/// Parent inscripteur (formulaire public).
+enum ParentRelation {
+  FATHER
+  MOTHER
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  fullName  String?
+  profilePhotoUrl String?
+  phone     String?
+  /// Père ou mère (saisi à l’inscription).
+  parentRelation ParentRelation?
+  /// Domicile du foyer (comme pour les enfants inscrits).
+  address   String?
+  role      UserRole @default(PARENT)
+  /// Hash bcrypt — créé ou complété à la pré-inscription ; connexion espace parent dès réception du mail.
+  passwordHash String?
+  /// Compte parent désactivé par l’admin (connexion refusée).
+  blocked   Boolean  @default(false)
+
+  children  Child[]
+  validatedEnrollments Enrollment[] @relation("EnrollmentValidatedBy")
+  notifications Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Child {
+  id          String   @id @default(uuid())
+  parentId    String?
+  parent      User?    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+
+  firstName   String
+  lastName    String
+  birthDate   DateTime?
+  gender      Gender   @default(UNSPECIFIED)
+  /// Allergies alimentaires ou autres (texte libre).
+  allergies   String?
+
+  enrollments Enrollment[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([parentId])
+}
+
+model Level {
+  id        String   @id @default(uuid())
+  name      String
+  order     Int?
+
+  classes   ClassRoom[]
+  enrollments Enrollment[]
+  documents LevelDocument[]
+  schoolYearPricings LevelSchoolYearPricing[]
+  serviceLevelPrices ServiceLevelPrice[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name])
+}
+
+model SchoolYear {
+  id        String           @id @default(uuid())
+  label     String           @unique
+  startDate DateTime
+  endDate   DateTime
+  status    SchoolYearStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ClassRoom {
+  id        String   @id @default(uuid())
+  levelId   String
+  level     Level    @relation(fields: [levelId], references: [id], onDelete: Restrict)
+  name      String
+
+  enrollments Enrollment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([levelId])
+  @@unique([levelId, name])
+}
+
+model Document {
+  id        String   @id @default(uuid())
+  title     String
+  url       String
+  kind      DocumentKind @default(SCHOOL)
+  /// Si false, le document n'apparaît pas dans l'espace parent.
+  published Boolean  @default(false)
+
+  levels    LevelDocument[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model LevelDocument {
+  levelId    String
+  documentId String
+
+  level      Level    @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime @default(now())
+
+  @@id([levelId, documentId])
+  @@index([documentId])
+}
+
+model Enrollment {
+  id          String           @id @default(uuid())
+  childId     String
+  child       Child            @relation(fields: [childId], references: [id], onDelete: Cascade)
+
+  levelId     String
+  level       Level            @relation(fields: [levelId], references: [id], onDelete: Restrict)
+
+  classId     String?
+  class       ClassRoom?       @relation(fields: [classId], references: [id], onDelete: SetNull)
+
+  schoolYear  String
+  status      EnrollmentStatus @default(PENDING)
+
+  /// Copie des infos parent saisies (audit / affichage ; le compte User est créé dès la pré-inscription).
+  pendingParentEmail      String?
+  pendingParentFirstName  String?
+  pendingParentLastName   String?
+  pendingParentPhone      String?
+  pendingParentRelation   ParentRelation?
+  pendingParentAddress    String?
+
+  validatedAt DateTime?
+  validatedById String?
+  validatedBy User? @relation("EnrollmentValidatedBy", fields: [validatedById], references: [id], onDelete: SetNull)
+  validationNote String?
+
+  payments    MonthlyPayment[]
+  serviceSubscriptions EnrollmentServiceSubscription[]
+  tuitionCharges TuitionCharge[]
+  monthlyInstallments MonthlyInstallment[]
+  notifications Notification[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([childId])
+  @@index([levelId])
+  @@index([classId])
+}
+
+/// Catalogue de services facturables (cantine, bus, etc.) — code stable pour l’inscription.
+model ServiceTariff {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  label     String
+  active    Boolean  @default(true)
+
+  subscriptions EnrollmentServiceSubscription[]
+  levelPrices   ServiceLevelPrice[]
+  installmentLines MonthlyInstallmentLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Tarifs par niveau et année scolaire : scolarité annuelle + mensualité de base.
+model LevelSchoolYearPricing {
+  id                 String   @id @default(uuid())
+  schoolYear         String
+  levelId            String
+  level              Level    @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  annualTuitionCents Int
+  monthlyBaseCents   Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolYear, levelId])
+  @@index([levelId])
+}
+
+/// Tarif mensuel d’un service pour un niveau et une année scolaire.
+model ServiceLevelPrice {
+  id                 String   @id @default(uuid())
+  schoolYear         String
+  levelId            String
+  level              Level    @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  serviceTariffId    String
+  serviceTariff      ServiceTariff @relation(fields: [serviceTariffId], references: [id], onDelete: Cascade)
+  monthlyAmountCents Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolYear, levelId, serviceTariffId])
+  @@index([levelId])
+}
+
+model EnrollmentServiceSubscription {
+  enrollmentId    String
+  serviceTariffId String
+  enrollment      Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  serviceTariff   ServiceTariff @relation(fields: [serviceTariffId], references: [id], onDelete: Cascade)
+
+  @@id([enrollmentId, serviceTariffId])
+}
+
+/// Scolarité annuelle : une ligne par inscription et par année scolaire ; payable seulement une fois validée.
+model TuitionCharge {
+  id             String        @id @default(uuid())
+  enrollmentId String
+  enrollment     Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  schoolYear     String
+  amountCents    Int
+  status         PaymentStatus @default(PENDING)
+  paidAt         DateTime?
+  transactionRef String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([enrollmentId, schoolYear])
+  @@index([enrollmentId])
+}
+
+/// Échéance mensuelle (mensualité + services) avec détail des lignes.
+model MonthlyInstallment {
+  id               String        @id @default(uuid())
+  enrollmentId     String
+  enrollment       Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  year             Int
+  month            Int
+  totalAmountCents Int
+  status           PaymentStatus @default(PENDING)
+  paidAt           DateTime?
+  transactionRef   String?
+  lines            MonthlyInstallmentLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([enrollmentId, year, month])
+  @@index([enrollmentId])
+}
+
+model MonthlyInstallmentLine {
+  id              String                 @id @default(uuid())
+  installmentId   String
+  installment     MonthlyInstallment     @relation(fields: [installmentId], references: [id], onDelete: Cascade)
+  kind            MonthlyBillingLineKind
+  serviceTariffId String?
+  serviceTariff   ServiceTariff?         @relation(fields: [serviceTariffId], references: [id], onDelete: SetNull)
+  label           String
+  amountCents     Int
+
+  @@index([installmentId])
+}
+
+model MonthlyPayment {
+  id           String        @id @default(uuid())
+  enrollmentId String
+  enrollment   Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  year         Int
+  month        Int
+  amountCents  Int
+  status       PaymentStatus @default(PENDING)
+  paidAt       DateTime?
+  transactionRef String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([enrollmentId, year, month])
+  @@index([enrollmentId])
+}
+
+model Notification {
+  id           String   @id @default(uuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  enrollmentId String?
+  enrollment   Enrollment? @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  title        String
+  body         String
+  /// Clé de déduplication (ex. overdue:tuition:uuid) ou canal métier historique
+  channel      String?
+  sentAt       DateTime?
+  /// ENROLLMENT_APPROVED | ENROLLMENT_REJECTED | DOCUMENT | EMAIL | PAYMENT_OVERDUE
+  kind         String?
+  readAt       DateTime?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+  @@index([enrollmentId])
+  @@index([userId, readAt])
+}
