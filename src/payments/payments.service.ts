@@ -1,9 +1,17 @@
-import { BadGatewayException, BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { EnrollmentStatus, PaymentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   private paydunyaBaseUrl() {
@@ -25,9 +33,68 @@ export class PaymentsService {
     };
   }
 
+  /** Réponse « créer facture » exploitable côté client (token racine ou URL contenant `/invoice/{token}`). */
+  private paydunyaCheckoutCreateHasToken(body: unknown): boolean {
+    if (!body || typeof body !== 'object') return false;
+    const b = body as Record<string, unknown>;
+    if (String(b.token ?? '').trim().length > 0) return true;
+    const data = b.data as Record<string, unknown> | undefined;
+    if (data && String(data.token ?? '').trim().length > 0) return true;
+    const rt = b.response_text ?? data?.response_text;
+    if (typeof rt === 'string' && /\/invoice\/[^/?#]+/i.test(rt)) return true;
+    return false;
+  }
+
+  private paydunyaNormalizedResponseCode(body: unknown): string | null {
+    if (!body || typeof body !== 'object') return null;
+    const rc = (body as Record<string, unknown>).response_code;
+    if (rc === undefined || rc === null) return null;
+    return String(rc).trim();
+  }
+
+  /** Message lisible renvoyé par PayDunya (priorité à `response_text`). */
+  private paydunyaPrimaryMessage(body: unknown): string | null {
+    if (!body || typeof body !== 'object') return null;
+    const b = body as Record<string, unknown>;
+    const pick = (v: unknown): string | null => {
+      if (typeof v !== 'string') return null;
+      const t = v.trim();
+      return t.length ? t : null;
+    };
+    const rt = pick(b.response_text);
+    if (rt) return rt;
+    const data = b.data as Record<string, unknown> | undefined;
+    if (data) {
+      const drt = pick(data.response_text);
+      if (drt) return drt;
+    }
+    const desc = pick(b.description);
+    if (desc) return desc;
+    const msg = b.message;
+    if (typeof msg === 'string' && msg.trim()) return msg.trim();
+    if (Array.isArray(msg) && msg.length) return msg.map(String).join('; ');
+    return null;
+  }
+
+  private formatPaydunyaHttpError(status: number, json: any, raw: string): string {
+    const primary = this.paydunyaPrimaryMessage(json);
+    if (primary) return primary;
+    if (raw && raw.length < 500) return raw.trim() || `HTTP ${status}`;
+    return `HTTP ${status}`;
+  }
+
   private async callPaydunya(path: string, init?: RequestInit) {
     const url = `${this.paydunyaBaseUrl()}${path}`;
-    const res = await fetch(url, init);
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`PayDunya fetch failed ${path}: ${err}`);
+      throw new BadGatewayException(
+        `Impossible de joindre PayDunya (${this.paydunyaBaseUrl()}). Vérifiez le réseau et PAYDUNYA_API_BASE (ex. sandbox: …/sandbox-api/v1). Détail : ${err}`,
+      );
+    }
     const raw = await res.text();
     let json: any = null;
     try {
@@ -36,7 +103,8 @@ export class PaymentsService {
       json = { raw };
     }
     if (!res.ok) {
-      const msg = json?.message ?? json?.description ?? `PayDunya HTTP ${res.status}`;
+      const msg = this.formatPaydunyaHttpError(res.status, json, raw);
+      this.logger.warn(`PayDunya HTTP ${res.status} ${path}: ${msg}`);
       throw new BadGatewayException(msg);
     }
     return json;
@@ -69,11 +137,33 @@ export class PaymentsService {
     if (!payload.store.name) {
       throw new BadRequestException('store.name est obligatoire.');
     }
-    return this.callPaydunya('/checkout-invoice/create', {
+    const created = await this.callPaydunya('/checkout-invoice/create', {
       method: 'POST',
       headers: this.paydunyaHeaders(),
       body: JSON.stringify(payload),
     });
+    const hasToken = this.paydunyaCheckoutCreateHasToken(created);
+    const rc = this.paydunyaNormalizedResponseCode(created);
+    const rcOk = rc === null || rc === '00' || rc === '0';
+    if (hasToken && rcOk) {
+      return created;
+    }
+    if (hasToken && !rcOk) {
+      this.logger.warn(`PayDunya checkout-invoice: token présent mais response_code=${rc}, on poursuit.`);
+      return created;
+    }
+    if (!rcOk) {
+      const msg =
+        this.paydunyaPrimaryMessage(created) ??
+        `PayDunya a refusé la création de facture (response_code=${rc ?? '?'})`;
+      this.logger.warn(`PayDunya checkout-invoice refusé: ${JSON.stringify(created)?.slice(0, 800)}`);
+      throw new BadGatewayException(String(msg));
+    }
+    this.logger.warn(`PayDunya checkout-invoice: réponse sans token exploitable: ${JSON.stringify(created)?.slice(0, 800)}`);
+    const fallbackNoToken =
+      this.paydunyaPrimaryMessage(created) ??
+      'Réponse PayDunya sans token de facture exploitable. Vérifiez les clés et PAYDUNYA_API_BASE (test vs production).';
+    throw new BadGatewayException(String(fallbackNoToken));
   }
 
   async triggerPaydunyaSoftpay(
@@ -82,12 +172,15 @@ export class PaymentsService {
   ): Promise<Record<string, unknown>> {
     const map: Record<string, string> = {
       wave_sn: '/softpay/wave-senegal',
-      wave_ci: '/softpay/wave-cote-divoire',
+      /** Doc PayDunya : `/api/v1/softpay/wave-ci` */
+      wave_ci: '/softpay/wave-ci',
       orange_sn: '/softpay/new-orange-money-senegal',
-      orange_ci: '/softpay/orange-money-cote-divoire',
+      /** Doc PayDunya : `/api/v1/softpay/orange-money-ci` */
+      orange_ci: '/softpay/orange-money-ci',
       free_sn: '/softpay/free-money-senegal',
       wizall_sn: '/softpay/wizall-money-senegal',
-      wizall_ci: '/softpay/wizall-money-cote-divoire',
+      mtn_ci: '/softpay/mtn-ci',
+      moov_ci: '/softpay/moov-ci',
       paydunya: '/softpay/paydunya',
     };
     const key = String(provider ?? '').trim().toLowerCase();
@@ -313,7 +406,7 @@ export class PaymentsService {
       throw new BadRequestException('Le moyen de paiement est obligatoire.');
     }
 
-    const allowed = new Set(['wave', 'orange_money', 'wizall', 'western_union']);
+    const allowed = new Set(['wave', 'orange_money', 'wizall', 'western_union', 'mtn_money', 'moov_money']);
     if (!allowed.has(channel)) {
       throw new BadRequestException('Moyen de paiement non reconnu.');
     }

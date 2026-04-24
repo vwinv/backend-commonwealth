@@ -179,7 +179,7 @@ export class ParentInvoicePdfService {
     const executablePath = this.resolveChromeExecutablePath();
     if (!executablePath) {
       throw new InternalServerErrorException(
-        'Chrome introuvable pour générer le PDF. Dans le dossier backend : `npx puppeteer browsers install chrome`, ou définissez PUPPETEER_EXECUTABLE_PATH vers un Chrome/Chromium installé.',
+        'Chrome introuvable pour générer le PDF. En production (ex: Render), définissez PUPPETEER_SKIP_DOWNLOAD=true et PUPPETEER_EXECUTABLE_PATH vers un binaire Chrome/Chromium installé.',
       );
     }
 
@@ -194,7 +194,7 @@ export class ParentInvoicePdfService {
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.error(`Puppeteer launch: ${msg}`);
       throw new InternalServerErrorException(
-        `Impossible de lancer Chrome pour le PDF (${msg}). Vérifiez PUPPETEER_EXECUTABLE_PATH ou exécutez \`npx puppeteer browsers install chrome\` dans backend-commonwealth.`,
+        `Impossible de lancer Chrome pour le PDF (${msg}). Vérifiez PUPPETEER_EXECUTABLE_PATH (et en prod, PUPPETEER_SKIP_DOWNLOAD=true).`,
       );
     }
 
