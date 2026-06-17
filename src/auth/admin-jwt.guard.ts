@@ -6,10 +6,9 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
-import type { UserRole } from '@prisma/client';
-import type { ParentJwtPayload } from './parent-jwt.guard';
+import type { AdminJwtPayload } from './parent-jwt.guard';
 
-export type AdminJwtPayload = ParentJwtPayload;
+export type { AdminJwtPayload, ParentJwtPayload } from './parent-jwt.guard';
 
 @Injectable()
 export class AdminJwtGuard implements CanActivate {
@@ -23,7 +22,7 @@ export class AdminJwtGuard implements CanActivate {
     if (!token) throw new UnauthorizedException();
     try {
       const payload = this.jwtService.verify<AdminJwtPayload>(token);
-      const role = payload.role as UserRole;
+      const role = payload.role;
       if (role !== 'ADMIN' && role !== 'STAFF') {
         throw new UnauthorizedException();
       }

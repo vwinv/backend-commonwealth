@@ -21,11 +21,16 @@ import type { Request } from 'express';
 import { mkdirSync } from 'fs';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
+import { AppModuleRole } from '@prisma/client';
 import { AdminJwtGuard } from '../auth/admin-jwt.guard';
+import { AdminPermissionGuard } from '../auth/admin-permission.guard';
+import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
+import { RequireAppModule } from '../auth/require-app-module.decorator';
 import { AdminDocumentsService } from './admin-documents.service';
 
 @Controller('admin/documents')
-@UseGuards(AdminJwtGuard)
+@UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
+@RequireAppModule(AppModuleRole.DOCUMENTS)
 export class AdminDocumentsController {
   constructor(private readonly documents: AdminDocumentsService) {}
 

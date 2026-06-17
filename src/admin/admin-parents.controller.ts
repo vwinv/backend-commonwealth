@@ -11,11 +11,16 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { AppModuleRole } from '@prisma/client';
 import { AdminJwtGuard } from '../auth/admin-jwt.guard';
+import { AdminPermissionGuard } from '../auth/admin-permission.guard';
+import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
+import { RequireAppModule } from '../auth/require-app-module.decorator';
 import { AdminParentsService } from './admin-parents.service';
 
 @Controller('admin/parents')
-@UseGuards(AdminJwtGuard)
+@UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
+@RequireAppModule(AppModuleRole.PARENTS)
 export class AdminParentsController {
   constructor(private readonly parents: AdminParentsService) {}
 

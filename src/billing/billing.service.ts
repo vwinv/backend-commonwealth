@@ -33,18 +33,54 @@ export class BillingService {
     const tariffs = await tx.serviceTariff.findMany({
       where: { code: { in: normalized }, active: true },
     });
-    const byCode = new Map(tariffs.map((t) => [t.code.toUpperCase(), t]));
-    for (const code of normalized) {
-      const t = byCode.get(code);
-      if (!t) continue;
-      await tx.enrollmentServiceSubscription.upsert({
-        where: {
-          enrollmentId_serviceTariffId: { enrollmentId, serviceTariffId: t.id },
-        },
-        update: {},
-        create: { enrollmentId, serviceTariffId: t.id },
+    await this.attachServiceSubscriptions(
+      tx,
+      enrollmentId,
+      tariffs.map((t) => ({ serviceTariffId: t.id, code: t.code, variantId: null })),
+    );
+  }
+
+  async attachServiceSubscriptions(
+    tx: BillingTx,
+    enrollmentId: string,
+    selections: Array<{ serviceTariffId: string; code?: string; variantId?: string | null }>,
+  ): Promise<void> {
+    const unique = new Map<string, { serviceTariffId: string; variantId: string | null }>();
+    for (const sel of selections) {
+      const serviceTariffId = String(sel.serviceTariffId ?? '').trim();
+      if (!serviceTariffId) continue;
+      unique.set(serviceTariffId, {
+        serviceTariffId,
+        variantId:
+          sel.variantId === undefined || sel.variantId === null || sel.variantId === ''
+            ? null
+            : String(sel.variantId).trim(),
       });
     }
+    if (unique.size === 0) return;
+
+    for (const sel of unique.values()) {
+      await tx.enrollmentServiceSubscription.upsert({
+        where: {
+          enrollmentId_serviceTariffId: { enrollmentId, serviceTariffId: sel.serviceTariffId },
+        },
+        update: { variantId: sel.variantId },
+        create: {
+          enrollmentId,
+          serviceTariffId: sel.serviceTariffId,
+          variantId: sel.variantId,
+        },
+      });
+    }
+  }
+
+  async replaceServiceSubscriptions(
+    tx: BillingTx,
+    enrollmentId: string,
+    selections: Array<{ serviceTariffId: string; code?: string; variantId?: string | null }>,
+  ): Promise<void> {
+    await tx.enrollmentServiceSubscription.deleteMany({ where: { enrollmentId } });
+    await this.attachServiceSubscriptions(tx, enrollmentId, selections);
   }
 
   /**
@@ -62,6 +98,7 @@ export class BillingService {
         status: true,
         schoolYear: true,
         levelId: true,
+        scheduleId: true,
       },
     });
     if (!enrollment || enrollment.status !== EnrollmentStatus.APPROVED) {
@@ -69,17 +106,35 @@ export class BillingService {
     }
 
     const warnings: string[] = [];
-    const pricing = await tx.levelSchoolYearPricing.findUnique({
-      where: {
-        schoolYear_levelId: { schoolYear: enrollment.schoolYear, levelId: enrollment.levelId },
-      },
-    });
+    let annualTuitionCents = 0;
+    let monthlyBaseCents = 0;
 
-    if (!pricing) {
-      warnings.push(
-        `Aucun barème pour l’année « ${enrollment.schoolYear} » et ce niveau : la scolarité et les mensualités ne sont pas générées.`,
-      );
-      return { tuitionCreated: false, monthsGenerated: 0, warnings };
+    if (enrollment.scheduleId) {
+      const schedule = await tx.levelSchedule.findUnique({
+        where: { id: enrollment.scheduleId },
+        select: { annualTuitionCents: true, monthlyBaseCents: true, active: true },
+      });
+      if (schedule?.active) {
+        annualTuitionCents = schedule.annualTuitionCents;
+        monthlyBaseCents = schedule.monthlyBaseCents;
+      }
+    }
+
+    if (!annualTuitionCents && !monthlyBaseCents) {
+      const pricing = await tx.levelSchoolYearPricing.findUnique({
+        where: {
+          schoolYear_levelId: { schoolYear: enrollment.schoolYear, levelId: enrollment.levelId },
+        },
+      });
+
+      if (!pricing) {
+        warnings.push(
+          `Aucun barème pour l’année « ${enrollment.schoolYear} » et ce niveau : la scolarité et les mensualités ne sont pas générées.`,
+        );
+        return { tuitionCreated: false, monthsGenerated: 0, warnings };
+      }
+      annualTuitionCents = pricing.annualTuitionCents;
+      monthlyBaseCents = pricing.monthlyBaseCents;
     }
 
     const existingTuition = await tx.tuitionCharge.findUnique({
@@ -92,14 +147,14 @@ export class BillingService {
         data: {
           enrollmentId,
           schoolYear: enrollment.schoolYear,
-          amountCents: pricing.annualTuitionCents,
+          amountCents: annualTuitionCents,
           status: PaymentStatus.PENDING,
         },
       });
     } else if (existingTuition.status === PaymentStatus.PENDING) {
       await tx.tuitionCharge.update({
         where: { id: existingTuition.id },
-        data: { amountCents: pricing.annualTuitionCents },
+        data: { amountCents: annualTuitionCents },
       });
     }
 
@@ -123,29 +178,32 @@ export class BillingService {
         kind: MonthlyBillingLineKind.MONTHLY_BASE,
         serviceTariffId: null,
         label: 'Mensualité',
-        amountCents: pricing.monthlyBaseCents,
+        amountCents: monthlyBaseCents,
       });
 
       for (const sub of subs) {
-        const sp = await tx.serviceLevelPrice.findUnique({
+        const sp = await tx.serviceLevelPrice.findFirst({
           where: {
-            schoolYear_levelId_serviceTariffId: {
-              schoolYear: enrollment.schoolYear,
-              levelId: enrollment.levelId,
-              serviceTariffId: sub.serviceTariffId,
-            },
+            schoolYear: enrollment.schoolYear,
+            levelId: enrollment.levelId,
+            serviceTariffId: sub.serviceTariffId,
+            variantId: sub.variantId ?? null,
           },
+          include: { variant: true },
         });
         if (!sp) {
           warnings.push(
-            `Pas de tarif mensuel pour le service « ${sub.serviceTariff.label} » (${sub.serviceTariff.code}) sur ce niveau / année.`,
+            `Pas de tarif mensuel pour l’option « ${sub.serviceTariff.label} » (${sub.serviceTariff.code}) sur ce niveau / année.`,
           );
           continue;
         }
+        const optionLabel = sp.variant?.label
+          ? `${sub.serviceTariff.label} — ${sp.variant.label}`
+          : sub.serviceTariff.label;
         lines.push({
           kind: MonthlyBillingLineKind.SERVICE,
           serviceTariffId: sub.serviceTariffId,
-          label: sub.serviceTariff.label,
+          label: optionLabel,
           amountCents: sp.monthlyAmountCents,
         });
       }

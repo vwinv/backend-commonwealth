@@ -40,6 +40,16 @@ enum DocumentKind {
   ADMIN
 }
 
+enum ServiceBillingPeriod {
+  MONTHLY
+  YEARLY
+}
+
+enum OptionPricingMode {
+  FLAT
+  CUSTOMIZABLE
+}
+
 /// Ligne de facture mensuelle : base (mensualité) ou option (service).
 enum MonthlyBillingLineKind {
   MONTHLY_BASE
@@ -58,6 +68,60 @@ enum ParentRelation {
   MOTHER
 }
 
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum ProgramCategory {
+  SORTIE_SCOLAIRE
+  PARENTS
+  PROFESSEURS
+  SKILLS_EVEIL
+}
+
+enum ProgramEventStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum FollowUpNoteCategory {
+  ACTIVITY
+  MEAL
+  NAP
+  MOOD
+  CARE
+}
+
+enum FollowUpNoteStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum VaccinationStatus {
+  DONE
+  MISSING
+}
+
+enum SchoolSignatureType {
+  CALLIGRAPHY
+  HANDWRITTEN
+  IMAGE
+}
+
+/// Rôles d'accès aux modules de l'espace admin (un utilisateur peut en avoir plusieurs).
+enum AppModuleRole {
+  INSCRIPTIONS
+  ELEVES
+  PARENTS
+  PROGRAMME
+  UTILISATEURS
+  FINANCE
+  DOCUMENTS
+  PARAMETRAGE
+}
+
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
@@ -69,17 +133,36 @@ model User {
   /// Domicile du foyer (comme pour les enfants inscrits).
   address   String?
   role      UserRole @default(PARENT)
+  /// Poste / fonction au sein de l'établissement (personnel admin).
+  jobTitle  String?
   /// Hash bcrypt — créé ou complété à la pré-inscription ; connexion espace parent dès réception du mail.
   passwordHash String?
   /// Compte parent désactivé par l’admin (connexion refusée).
   blocked   Boolean  @default(false)
+  /// Première connexion : l'utilisateur doit définir un nouveau mot de passe.
+  mustChangePassword Boolean @default(false)
 
   children  Child[]
   validatedEnrollments Enrollment[] @relation("EnrollmentValidatedBy")
   notifications Notification[]
+  cashSessionsOpened CashSession[] @relation("CashSessionOpenedBy")
+  appModuleRoles     UserAppModuleRole[]
+  childFollowUpNotes ChildFollowUpNote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model UserAppModuleRole {
+  id        String        @id @default(uuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      AppModuleRole
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, role])
+  @@index([userId])
 }
 
 model Child {
@@ -95,6 +178,8 @@ model Child {
   allergies   String?
 
   enrollments Enrollment[]
+  followUpNotes ChildFollowUpNote[]
+  healthRecord  ChildHealthRecord?
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -112,6 +197,8 @@ model Level {
   documents LevelDocument[]
   schoolYearPricings LevelSchoolYearPricing[]
   serviceLevelPrices ServiceLevelPrice[]
+  schedules          LevelSchedule[]
+  programEvents ProgramEventLevel[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -131,10 +218,14 @@ model SchoolYear {
 }
 
 model ClassRoom {
-  id        String   @id @default(uuid())
-  levelId   String
-  level     Level    @relation(fields: [levelId], references: [id], onDelete: Restrict)
-  name      String
+  id          String   @id @default(uuid())
+  levelId     String
+  level       Level    @relation(fields: [levelId], references: [id], onDelete: Restrict)
+  name        String
+  /// Effectif maximum de la classe.
+  capacity    Int      @default(22)
+  /// Enseignant principal (nom affiché).
+  headTeacher String?
 
   enrollments Enrollment[]
 
@@ -180,6 +271,10 @@ model Enrollment {
   levelId     String
   level       Level            @relation(fields: [levelId], references: [id], onDelete: Restrict)
 
+  /// Horaire choisi à l'inscription (détermine inscription + mensualité de base).
+  scheduleId  String?
+  schedule    LevelSchedule?   @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
   classId     String?
   class       ClassRoom?       @relation(fields: [classId], references: [id], onDelete: SetNull)
 
@@ -199,6 +294,11 @@ model Enrollment {
   validatedBy User? @relation("EnrollmentValidatedBy", fields: [validatedById], references: [id], onDelete: SetNull)
   validationNote String?
 
+  /// Progression du wizard public (1–5). 5 = dossier soumis, en attente de validation admin.
+  wizardStep   Int      @default(1)
+  wizardData   Json?
+  resumeToken  String?  @unique
+
   payments    MonthlyPayment[]
   serviceSubscriptions EnrollmentServiceSubscription[]
   tuitionCharges TuitionCharge[]
@@ -215,17 +315,65 @@ model Enrollment {
 
 /// Catalogue de services facturables (cantine, bus, etc.) — code stable pour l’inscription.
 model ServiceTariff {
-  id        String   @id @default(uuid())
-  code      String   @unique
-  label     String
-  active    Boolean  @default(true)
+  id            String               @id @default(uuid())
+  code          String               @unique
+  label         String
+  active        Boolean              @default(true)
+  amountCents   Int                  @default(0)
+  billingPeriod ServiceBillingPeriod @default(MONTHLY)
+  pricingMode   OptionPricingMode    @default(FLAT)
 
   subscriptions EnrollmentServiceSubscription[]
   levelPrices   ServiceLevelPrice[]
   installmentLines MonthlyInstallmentLine[]
+  variants      ServiceOptionVariant[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// Variante d'une option (ex. formule cantine) avec tarif propre.
+model ServiceOptionVariant {
+  id              String               @id @default(uuid())
+  serviceTariffId String
+  serviceTariff   ServiceTariff        @relation(fields: [serviceTariffId], references: [id], onDelete: Cascade)
+  label           String
+  code            String
+  amountCents     Int                  @default(0)
+  billingPeriod   ServiceBillingPeriod @default(MONTHLY)
+  order           Int?
+  active          Boolean              @default(true)
+
+  levelPrices     ServiceLevelPrice[]
+  subscriptions   EnrollmentServiceSubscription[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([serviceTariffId, code])
+  @@index([serviceTariffId])
+}
+
+/// Horaire / formule horaire d'un niveau pour une année scolaire (tarifs inscription + mensualité).
+model LevelSchedule {
+  id                 String   @id @default(uuid())
+  schoolYear         String
+  levelId            String
+  level              Level    @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  label              String
+  timeDescription    String?
+  annualTuitionCents Int      @default(0)
+  monthlyBaseCents   Int      @default(0)
+  order              Int?
+  active             Boolean  @default(true)
+
+  enrollments        Enrollment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolYear, levelId, label])
+  @@index([levelId, schoolYear])
 }
 
 /// Tarifs par niveau et année scolaire : scolarité annuelle + mensualité de base.
@@ -252,20 +400,24 @@ model ServiceLevelPrice {
   level              Level    @relation(fields: [levelId], references: [id], onDelete: Cascade)
   serviceTariffId    String
   serviceTariff      ServiceTariff @relation(fields: [serviceTariffId], references: [id], onDelete: Cascade)
+  variantId          String?
+  variant            ServiceOptionVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
   monthlyAmountCents Int
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([schoolYear, levelId, serviceTariffId])
+  @@unique([schoolYear, levelId, serviceTariffId, variantId], map: "ServiceLevelPrice_sy_lvl_svc_var_key")
   @@index([levelId])
 }
 
 model EnrollmentServiceSubscription {
   enrollmentId    String
   serviceTariffId String
+  variantId       String?
   enrollment      Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
   serviceTariff   ServiceTariff @relation(fields: [serviceTariffId], references: [id], onDelete: Cascade)
+  variant         ServiceOptionVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@id([enrollmentId, serviceTariffId])
 }
@@ -362,4 +514,151 @@ model Notification {
   @@index([userId])
   @@index([enrollmentId])
   @@index([userId, readAt])
+}
+
+/// Session de caisse (ouverture / fermeture journalière).
+model CashSession {
+  id         String            @id @default(uuid())
+  status     CashSessionStatus @default(OPEN)
+  openedAt   DateTime          @default(now())
+  closedAt   DateTime?
+  openedById String?
+  openedBy   User?             @relation("CashSessionOpenedBy", fields: [openedById], references: [id], onDelete: SetNull)
+  expenses   CashExpense[]
+  manualEntries CashManualEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([openedAt])
+}
+
+/// Sortie de caisse (dépense) liée à une session ouverte.
+model CashExpense {
+  id          String       @id @default(uuid())
+  sessionId   String
+  session     CashSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  label       String
+  amountCents Int
+  paymentMethod String?
+  expenseAt   DateTime     @default(now())
+  hasInvoice  Boolean      @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([expenseAt])
+}
+
+/// Entrée manuelle de caisse (encaissement hors paiement en ligne automatique).
+model CashManualEntry {
+  id            String      @id @default(uuid())
+  sessionId     String
+  session       CashSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  description   String
+  amountCents   Int
+  paymentMethod String?
+  source        String?
+  invoiceNumber String?
+  entryAt       DateTime    @default(now())
+  hasInvoice    Boolean     @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([entryAt])
+}
+
+/// Événement du programme scolaire (sorties, réunions, ateliers…).
+model ProgramEvent {
+  id            String             @id @default(uuid())
+  title         String
+  description   String?
+  eventDate     DateTime
+  endDate       DateTime?
+  location      String?
+  assignedStaff String?
+  category      ProgramCategory
+  status        ProgramEventStatus @default(PLANNED)
+  schoolYear    String
+
+  levels ProgramEventLevel[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolYear])
+  @@index([eventDate])
+  @@index([category])
+  @@index([status])
+}
+
+model ProgramEventLevel {
+  id             String       @id @default(uuid())
+  programEventId String
+  programEvent   ProgramEvent @relation(fields: [programEventId], references: [id], onDelete: Cascade)
+  levelId        String
+  level          Level        @relation(fields: [levelId], references: [id], onDelete: Cascade)
+
+  @@unique([programEventId, levelId])
+  @@index([levelId])
+}
+
+/// Note du carnet de suivi quotidien (visible aux parents une fois publiée).
+model ChildFollowUpNote {
+  id          String               @id @default(uuid())
+  childId     String
+  child       Child                @relation(fields: [childId], references: [id], onDelete: Cascade)
+  category    FollowUpNoteCategory
+  content     String
+  status      FollowUpNoteStatus   @default(DRAFT)
+  /// Jour concerné (date calendaire).
+  noteDate    DateTime             @db.Date
+  authorId    String?
+  author      User?                @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  publishedAt DateTime?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([childId, noteDate])
+  @@index([childId, status])
+}
+
+/// Fiche santé de l'élève (signatures école + parents).
+model ChildHealthRecord {
+  id                         String               @id @default(uuid())
+  childId                    String               @unique
+  child                      Child                @relation(fields: [childId], references: [id], onDelete: Cascade)
+  bloodGroup                 String?
+  doctorName                 String?
+  doctorPhone                String?
+  knownAllergies             String?
+  ongoingTreatments          String?
+  dietaryRegime              String?
+  instructions               String?
+  schoolSignatureType        SchoolSignatureType?
+  schoolSignatureText        String?
+  schoolSignatureUrl         String?
+  schoolSignedAt             DateTime?
+  schoolSignedById           String?
+  parentSignatureUrl         String?
+  parentSignedAt             DateTime?
+  parentSignatureRequestedAt DateTime?
+  vaccinations               ChildVaccination[]
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+}
+
+model ChildVaccination {
+  id             String             @id @default(uuid())
+  healthRecordId String
+  healthRecord   ChildHealthRecord  @relation(fields: [healthRecordId], references: [id], onDelete: Cascade)
+  name           String
+  status         VaccinationStatus  @default(MISSING)
+  vaccinatedAt   DateTime?          @db.Date
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([healthRecordId])
 }

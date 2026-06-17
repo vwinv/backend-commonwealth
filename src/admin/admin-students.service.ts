@@ -1,6 +1,18 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { EnrollmentStatus, Gender, ParentRelation, PaymentStatus, Prisma } from '@prisma/client';
+import {
+  EnrollmentStatus,
+  FollowUpNoteCategory,
+  FollowUpNoteStatus,
+  Gender,
+  ParentRelation,
+  PaymentStatus,
+  Prisma,
+  SchoolSignatureType,
+  VaccinationStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 function formatSchoolYearLabel(schoolYear: string): string {
   const s = schoolYear.trim();
@@ -58,7 +70,11 @@ function normalizeLevelName(v: string): string {
 
 @Injectable()
 export class AdminStudentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly mail: MailService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   private paidApprovedBase(): Prisma.EnrollmentWhereInput {
     return {
@@ -348,5 +364,418 @@ export class AdminStudentsService {
     });
 
     return this.getProfile(childId);
+  }
+
+  private async assertEligibleChild(childId: string) {
+    const ok = await this.prisma.enrollment.findFirst({
+      where: {
+        childId,
+        ...this.paidApprovedBase(),
+      },
+      select: { id: true },
+    });
+    if (!ok) {
+      throw new NotFoundException('Élève introuvable ou non éligible');
+    }
+  }
+
+  private mapFollowUpNote(note: {
+    id: string;
+    category: FollowUpNoteCategory;
+    content: string;
+    status: FollowUpNoteStatus;
+    noteDate: Date;
+    createdAt: Date;
+    publishedAt: Date | null;
+  }) {
+    return {
+      id: note.id,
+      category: note.category,
+      content: note.content,
+      status: note.status,
+      noteDate: note.noteDate.toISOString().slice(0, 10),
+      timeLabel: note.createdAt.toLocaleTimeString('fr-FR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      createdAt: note.createdAt.toISOString(),
+      publishedAt: note.publishedAt?.toISOString() ?? null,
+    };
+  }
+
+  private parseFollowUpCategory(raw: unknown): FollowUpNoteCategory {
+    const v = String(raw ?? '').trim().toUpperCase();
+    const allowed = Object.values(FollowUpNoteCategory) as string[];
+    if (!allowed.includes(v)) {
+      throw new BadRequestException('Catégorie de note invalide.');
+    }
+    return v as FollowUpNoteCategory;
+  }
+
+  private parseNoteDate(raw: unknown): Date {
+    if (raw === undefined || raw === null || raw === '') {
+      const now = new Date();
+      return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+    }
+    const s = String(raw).trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) {
+      throw new BadRequestException('Date de note invalide (format AAAA-MM-JJ).');
+    }
+    const y = Number(m[1]);
+    const mo = Number(m[2]) - 1;
+    const d = Number(m[3]);
+    const dt = new Date(Date.UTC(y, mo, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo || dt.getUTCDate() !== d) {
+      throw new BadRequestException('Date de note invalide.');
+    }
+    return dt;
+  }
+
+  async listFollowUpNotes(childId: string) {
+    await this.assertEligibleChild(childId);
+    const notes = await this.prisma.childFollowUpNote.findMany({
+      where: { childId },
+      orderBy: [{ noteDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    const draftCount = notes.filter((n) => n.status === FollowUpNoteStatus.DRAFT).length;
+    const publishedCount = notes.filter((n) => n.status === FollowUpNoteStatus.PUBLISHED).length;
+    return {
+      items: notes.map((n) => this.mapFollowUpNote(n)),
+      stats: { draftCount, publishedCount },
+    };
+  }
+
+  async createFollowUpNote(childId: string, authorId: string, body: Record<string, unknown>) {
+    await this.assertEligibleChild(childId);
+    const category = this.parseFollowUpCategory(body.category);
+    const content = String(body.content ?? '').trim();
+    if (!content) {
+      throw new BadRequestException('Le contenu de la note est obligatoire.');
+    }
+    const noteDate = this.parseNoteDate(body.noteDate);
+    const note = await this.prisma.childFollowUpNote.create({
+      data: {
+        childId,
+        category,
+        content,
+        noteDate,
+        authorId,
+        status: FollowUpNoteStatus.DRAFT,
+      },
+    });
+    return this.mapFollowUpNote(note);
+  }
+
+  async updateFollowUpNote(childId: string, noteId: string, body: Record<string, unknown>) {
+    await this.assertEligibleChild(childId);
+    const existing = await this.prisma.childFollowUpNote.findFirst({
+      where: { id: noteId, childId },
+    });
+    if (!existing) {
+      throw new NotFoundException('Note introuvable.');
+    }
+
+    const data: Prisma.ChildFollowUpNoteUpdateInput = {};
+
+    if (body.category !== undefined) {
+      data.category = this.parseFollowUpCategory(body.category);
+    }
+    if (body.content !== undefined) {
+      const content = String(body.content).trim();
+      if (!content) {
+        throw new BadRequestException('Le contenu de la note est obligatoire.');
+      }
+      data.content = content;
+    }
+    if (body.status !== undefined) {
+      const status = String(body.status).trim().toUpperCase();
+      if (status === FollowUpNoteStatus.PUBLISHED) {
+        data.status = FollowUpNoteStatus.PUBLISHED;
+        data.publishedAt = new Date();
+      } else if (status === FollowUpNoteStatus.DRAFT) {
+        data.status = FollowUpNoteStatus.DRAFT;
+        data.publishedAt = null;
+      } else {
+        throw new BadRequestException('Statut de note invalide.');
+      }
+    }
+
+    if (!Object.keys(data).length) {
+      throw new BadRequestException('Aucune modification fournie.');
+    }
+
+    const note = await this.prisma.childFollowUpNote.update({
+      where: { id: noteId },
+      data,
+    });
+    return this.mapFollowUpNote(note);
+  }
+
+  async deleteFollowUpNote(childId: string, noteId: string) {
+    await this.assertEligibleChild(childId);
+    const existing = await this.prisma.childFollowUpNote.findFirst({
+      where: { id: noteId, childId },
+      select: { id: true },
+    });
+    if (!existing) {
+      throw new NotFoundException('Note introuvable.');
+    }
+    await this.prisma.childFollowUpNote.delete({ where: { id: noteId } });
+  }
+
+  async publishFollowUpDay(childId: string, noteDateRaw: unknown) {
+    await this.assertEligibleChild(childId);
+    const noteDate = this.parseNoteDate(noteDateRaw);
+    await this.prisma.childFollowUpNote.updateMany({
+      where: {
+        childId,
+        noteDate,
+        status: FollowUpNoteStatus.DRAFT,
+      },
+      data: {
+        status: FollowUpNoteStatus.PUBLISHED,
+        publishedAt: new Date(),
+      },
+    });
+    return this.listFollowUpNotes(childId);
+  }
+
+  private mapHealthRecord(record: {
+    id: string;
+    childId: string;
+    bloodGroup: string | null;
+    doctorName: string | null;
+    doctorPhone: string | null;
+    knownAllergies: string | null;
+    ongoingTreatments: string | null;
+    dietaryRegime: string | null;
+    instructions: string | null;
+    schoolSignatureType: SchoolSignatureType | null;
+    schoolSignatureText: string | null;
+    schoolSignatureUrl: string | null;
+    schoolSignedAt: Date | null;
+    parentSignatureUrl: string | null;
+    parentSignedAt: Date | null;
+    parentSignatureRequestedAt: Date | null;
+    vaccinations: {
+      id: string;
+      name: string;
+      status: VaccinationStatus;
+      vaccinatedAt: Date | null;
+    }[];
+  }) {
+    const schoolSigned = Boolean(record.schoolSignedAt);
+    const parentSigned = Boolean(record.parentSignedAt && record.parentSignatureUrl);
+    const isValid = schoolSigned && parentSigned;
+    return {
+      id: record.id,
+      childId: record.childId,
+      bloodGroup: record.bloodGroup ?? '',
+      doctorName: record.doctorName ?? '',
+      doctorPhone: record.doctorPhone ?? '',
+      knownAllergies: record.knownAllergies ?? '',
+      ongoingTreatments: record.ongoingTreatments ?? '',
+      dietaryRegime: record.dietaryRegime ?? '',
+      instructions: record.instructions ?? '',
+      schoolSignatureType: record.schoolSignatureType,
+      schoolSignatureText: record.schoolSignatureText,
+      schoolSignatureUrl: record.schoolSignatureUrl,
+      schoolSignedAt: record.schoolSignedAt?.toISOString() ?? null,
+      schoolSigned: schoolSigned,
+      parentSignatureUrl: record.parentSignatureUrl,
+      parentSignedAt: record.parentSignedAt?.toISOString() ?? null,
+      parentSigned: parentSigned,
+      parentSignatureRequestedAt: record.parentSignatureRequestedAt?.toISOString() ?? null,
+      isValid,
+      statusLabel: isValid ? 'Fiche validée' : 'En attente de signature',
+      vaccinations: record.vaccinations.map((v) => ({
+        id: v.id,
+        name: v.name,
+        status: v.status,
+        vaccinatedAt: v.vaccinatedAt ? v.vaccinatedAt.toISOString().slice(0, 10) : null,
+        dateLabel:
+          v.status === VaccinationStatus.DONE && v.vaccinatedAt
+            ? v.vaccinatedAt.toLocaleDateString('fr-FR', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+              })
+            : null,
+      })),
+    };
+  }
+
+  private async ensureHealthRecord(childId: string) {
+    await this.assertEligibleChild(childId);
+    const existing = await this.prisma.childHealthRecord.findUnique({
+      where: { childId },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+    if (existing) return existing;
+
+    const child = await this.prisma.child.findUnique({
+      where: { id: childId },
+      select: { allergies: true },
+    });
+    const created = await this.prisma.childHealthRecord.create({
+      data: {
+        childId,
+        knownAllergies: child?.allergies?.trim() || null,
+      },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+    return created;
+  }
+
+  async getHealthRecord(childId: string) {
+    const record = await this.ensureHealthRecord(childId);
+    const full = await this.prisma.childHealthRecord.findUniqueOrThrow({
+      where: { id: record.id },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+    return this.mapHealthRecord(full);
+  }
+
+  async updateHealthRecord(childId: string, body: Record<string, unknown>) {
+    const record = await this.ensureHealthRecord(childId);
+    const str = (v: unknown) => (v === undefined ? undefined : String(v ?? '').trim() || null);
+
+    const vaccinationsIn = body.vaccinations;
+    const vaccinations = Array.isArray(vaccinationsIn)
+      ? vaccinationsIn.map((row) => {
+          const r = row as Record<string, unknown>;
+          const name = String(r.name ?? '').trim();
+          if (!name) return null;
+          const statusRaw = String(r.status ?? 'MISSING').toUpperCase();
+          const status =
+            statusRaw === VaccinationStatus.DONE ? VaccinationStatus.DONE : VaccinationStatus.MISSING;
+          let vaccinatedAt: Date | null = null;
+          if (status === VaccinationStatus.DONE && r.vaccinatedAt) {
+            vaccinatedAt = this.parseNoteDate(r.vaccinatedAt);
+          }
+          return { name, status, vaccinatedAt };
+        }).filter(Boolean) as { name: string; status: VaccinationStatus; vaccinatedAt: Date | null }[]
+      : null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.childHealthRecord.update({
+        where: { id: record.id },
+        data: {
+          bloodGroup: str(body.bloodGroup),
+          doctorName: str(body.doctorName),
+          doctorPhone: str(body.doctorPhone),
+          knownAllergies: str(body.knownAllergies),
+          ongoingTreatments: str(body.ongoingTreatments),
+          dietaryRegime: str(body.dietaryRegime),
+          instructions: str(body.instructions),
+        },
+      });
+
+      if (vaccinations) {
+        await tx.childVaccination.deleteMany({ where: { healthRecordId: record.id } });
+        if (vaccinations.length) {
+          await tx.childVaccination.createMany({
+            data: vaccinations.map((v) => ({
+              healthRecordId: record.id,
+              name: v.name,
+              status: v.status,
+              vaccinatedAt: v.vaccinatedAt,
+            })),
+          });
+        }
+      }
+    });
+
+    return this.getHealthRecord(childId);
+  }
+
+  async signSchoolHealthRecord(
+    childId: string,
+    adminUserId: string,
+    body: Record<string, unknown>,
+    signatureImageUrl?: string,
+  ) {
+    const record = await this.ensureHealthRecord(childId);
+    const typeRaw = String(body.type ?? '').trim().toUpperCase();
+
+    if (
+      typeRaw === SchoolSignatureType.IMAGE ||
+      typeRaw === SchoolSignatureType.HANDWRITTEN
+    ) {
+      const url = String(signatureImageUrl ?? body.signatureUrl ?? '').trim();
+      if (!url) {
+        throw new BadRequestException('Image de signature requise.');
+      }
+      await this.prisma.childHealthRecord.update({
+        where: { id: record.id },
+        data: {
+          schoolSignatureType:
+            typeRaw === SchoolSignatureType.HANDWRITTEN
+              ? SchoolSignatureType.HANDWRITTEN
+              : SchoolSignatureType.IMAGE,
+          schoolSignatureText: null,
+          schoolSignatureUrl: url,
+          schoolSignedAt: new Date(),
+          schoolSignedById: adminUserId,
+        },
+      });
+    } else if (typeRaw === SchoolSignatureType.CALLIGRAPHY) {
+      const text = String(body.text ?? '').trim();
+      if (!text) {
+        throw new BadRequestException('Saisissez le texte de la signature.');
+      }
+      await this.prisma.childHealthRecord.update({
+        where: { id: record.id },
+        data: {
+          schoolSignatureType: SchoolSignatureType.CALLIGRAPHY,
+          schoolSignatureText: text,
+          schoolSignatureUrl: null,
+          schoolSignedAt: new Date(),
+          schoolSignedById: adminUserId,
+        },
+      });
+    } else {
+      throw new BadRequestException('Type de signature invalide.');
+    }
+
+    return this.getHealthRecord(childId);
+  }
+
+  async requestParentHealthSignature(childId: string) {
+    const record = await this.ensureHealthRecord(childId);
+    const child = await this.prisma.child.findUnique({
+      where: { id: childId },
+      select: {
+        parentId: true,
+        firstName: true,
+        lastName: true,
+        parent: { select: { email: true, fullName: true, phone: true } },
+      },
+    });
+    if (!child?.parentId) {
+      throw new BadRequestException('Aucun parent lié à cet élève.');
+    }
+    const parentEmail = child.parent?.email?.trim();
+    if (!parentEmail) {
+      throw new BadRequestException('Le parent n’a pas d’adresse e-mail.');
+    }
+
+    await this.prisma.childHealthRecord.update({
+      where: { id: record.id },
+      data: { parentSignatureRequestedAt: new Date() },
+    });
+
+    const name = `${child.firstName} ${child.lastName}`.trim();
+
+    await this.notifications.notifyHealthSignatureRequest(child.parentId, childId, name);
+    await this.mail.sendHealthSignatureRequest({
+      to: parentEmail,
+      parentName: child.parent?.fullName ?? null,
+      parentPhone: child.parent?.phone ?? null,
+      childName: name,
+    });
+
+    return this.getHealthRecord(childId);
   }
 }

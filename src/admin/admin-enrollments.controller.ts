@@ -10,8 +10,12 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { AppModuleRole } from '@prisma/client';
 import type { Request } from 'express';
 import { AdminJwtGuard, type AdminJwtPayload } from '../auth/admin-jwt.guard';
+import { AdminPermissionGuard } from '../auth/admin-permission.guard';
+import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
+import { RequireAppModule } from '../auth/require-app-module.decorator';
 import { BillingService } from '../billing/billing.service';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { AdminEnrollmentsService } from './admin-enrollments.service';
@@ -19,7 +23,8 @@ import { AdminEnrollmentsService } from './admin-enrollments.service';
 type AdminRequest = Request & { adminUser?: AdminJwtPayload };
 
 @Controller('admin/enrollments')
-@UseGuards(AdminJwtGuard)
+@UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
+@RequireAppModule(AppModuleRole.INSCRIPTIONS)
 export class AdminEnrollmentsController {
   constructor(
     private readonly adminEnrollments: AdminEnrollmentsService,

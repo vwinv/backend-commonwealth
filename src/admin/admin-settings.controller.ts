@@ -1,9 +1,14 @@
-import { Body, Controller, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { AppModuleRole } from '@prisma/client';
 import { AdminJwtGuard } from '../auth/admin-jwt.guard';
+import { AdminPermissionGuard } from '../auth/admin-permission.guard';
+import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
+import { RequireAppModule } from '../auth/require-app-module.decorator';
 import { AdminSettingsService } from './admin-settings.service';
 
 @Controller('admin/settings')
-@UseGuards(AdminJwtGuard)
+@UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
+@RequireAppModule(AppModuleRole.PARAMETRAGE)
 export class AdminSettingsController {
   constructor(private readonly settings: AdminSettingsService) {}
 
@@ -73,14 +78,49 @@ export class AdminSettingsController {
     return this.settings.createClass(body);
   }
 
+  @Patch('classes/:id')
+  updateClass(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.settings.updateClass(id, body);
+  }
+
+  @Delete('classes/:id')
+  deleteClass(@Param('id') id: string) {
+    return this.settings.deleteClass(id);
+  }
+
+  @Put('levels/:levelId/schedules')
+  replaceLevelSchedules(@Param('levelId') levelId: string, @Body() body: Record<string, unknown>) {
+    return this.settings.replaceLevelSchedules(levelId, body);
+  }
+
+  @Patch('levels/:levelId')
+  updateLevel(@Param('levelId') levelId: string, @Body() body: Record<string, unknown>) {
+    return this.settings.updateLevel(levelId, body);
+  }
+
+  @Get('levels/:levelId/schedules')
+  getLevelSchedules(@Param('levelId') levelId: string, @Query('schoolYear') schoolYear?: string) {
+    return this.settings.getLevelSchedules(levelId, String(schoolYear ?? ''));
+  }
+
   @Get('services')
-  listServices() {
-    return this.settings.listServiceTariffs();
+  listServices(@Query('schoolYear') schoolYear?: string) {
+    return this.settings.listServiceTariffs(schoolYear);
   }
 
   @Post('services')
   createService(@Body() body: Record<string, unknown>) {
     return this.settings.createServiceTariff(body);
+  }
+
+  @Patch('services/:id')
+  updateService(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.settings.updateServiceTariff(id, body);
+  }
+
+  @Delete('services/:id')
+  deleteService(@Param('id') id: string) {
+    return this.settings.deleteServiceTariff(id);
   }
 
   @Get('service-prices')

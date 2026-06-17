@@ -230,4 +230,30 @@ export class ParentController {
   ) {
     return this.parent.reenrollChild(jwt.sub, childId, body ?? {});
   }
+
+  @Get('children/:childId/space')
+  childSpace(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('childId') childId: string,
+  ) {
+    return this.parent.getChildSpace(jwt.sub, childId);
+  }
+
+  @Post('children/:childId/health-record/sign')
+  signChildHealthRecord(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('childId') childId: string,
+    @Body() body: Record<string, unknown> | undefined,
+  ) {
+    return this.parent.signChildHealthRecord(jwt.sub, childId, body ?? {});
+  }
+
+  @Patch('children/:childId/health-record')
+  updateChildHealthRecord(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('childId') childId: string,
+    @Body() body: Record<string, unknown> | undefined,
+  ) {
+    return this.parent.updateChildHealthRecord(jwt.sub, childId, body ?? {});
+  }
 }

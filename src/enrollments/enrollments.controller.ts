@@ -11,9 +11,29 @@ export class EnrollmentsController {
     return this.enrollments.createPublicEnrollment(body);
   }
 
+  @Post('public/enrollments/options')
+  savePublicEnrollmentOptions(@Body() body: any) {
+    return this.enrollments.savePublicEnrollmentOptions(body);
+  }
+
   @Post('public/enrollments/batch')
   createPublicEnrollmentBatch(@Body() body: any) {
     return this.enrollments.createPublicEnrollmentBatch(body);
+  }
+
+  @Post('public/enrollments/health')
+  savePublicEnrollmentHealth(@Body() body: any) {
+    return this.enrollments.savePublicEnrollmentHealth(body);
+  }
+
+  @Post('public/enrollments/family')
+  savePublicEnrollmentFamily(@Body() body: any) {
+    return this.enrollments.savePublicEnrollmentFamily(body);
+  }
+
+  @Get('public/enrollments/resume/:token')
+  getPublicEnrollmentResume(@Param('token') token: string) {
+    return this.enrollments.getPublicEnrollmentResume(token);
   }
 
   // Backoffice - list enrollments

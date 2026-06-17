@@ -182,11 +182,7 @@ export function schoolTrimesterFromMonth(month: number): 1 | 2 | 3 {
   return (t > 3 ? 3 : t) as 1 | 2 | 3;
 }
 
-export function stableInvoiceNumber(prefixYear: number, entityId: string): string {
-  const hex = entityId.replace(/-/g, '').slice(-8);
-  const n = Number.parseInt(hex, 16) % 100000;
-  return `INV-${prefixYear}-${String(n).padStart(5, '0')}`;
-}
+export { stableInvoiceNumber } from '../common/invoice-number';
 
 export function matriculeFromEnrollmentId(enrollmentId: string): string {
   const compact = enrollmentId.replace(/-/g, '').toUpperCase();

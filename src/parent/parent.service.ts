@@ -5,11 +5,63 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { EnrollmentStatus, Gender, Prisma, SchoolYearStatus, UserRole } from '@prisma/client';
+import {
+  EnrollmentStatus,
+  FollowUpNoteCategory,
+  FollowUpNoteStatus,
+  Gender,
+  ParentRelation,
+  Prisma,
+  SchoolSignatureType,
+  SchoolYearStatus,
+  UserRole,
+  VaccinationStatus,
+} from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { BillingService } from '../billing/billing.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { saveHealthRecordParentSignatureFromDataUrl } from './parent-health-signature.util';
+
+function matriculeFromChildId(childId: string): string {
+  const compact = childId.replace(/-/g, '').toUpperCase();
+  return `MD${compact.slice(0, 6)}`;
+}
+
+function genderLabelFr(gender: Gender): string {
+  if (gender === Gender.FEMALE) return 'Fille';
+  if (gender === Gender.MALE) return 'Garçon';
+  return '—';
+}
+
+function parentRelationLabelFr(rel: ParentRelation | null | undefined): 'Père' | 'Mère' | null {
+  if (rel === ParentRelation.FATHER) return 'Père';
+  if (rel === ParentRelation.MOTHER) return 'Mère';
+  return null;
+}
+
+function splitAllergies(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  return raw
+    .split(/[,;|/]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function ageLabelShort(birthDate: Date | null): string {
+  if (!birthDate) return '—';
+  const now = new Date();
+  let months =
+    (now.getFullYear() - birthDate.getFullYear()) * 12 + (now.getMonth() - birthDate.getMonth());
+  if (now.getDate() < birthDate.getDate()) months -= 1;
+  if (months < 0) return '—';
+  if (months < 12) {
+    if (months === 0) return 'Né(e) récemment';
+    return months === 1 ? '1 mois' : `${months} mois`;
+  }
+  const years = Math.floor(months / 12);
+  return years === 1 ? '1 an' : `${years} ans`;
+}
 
 type ChildRow = {
   id: string;
@@ -81,6 +133,7 @@ export class ParentService {
           profilePhotoUrl: true,
           phone: true,
           address: true,
+          parentRelation: true,
           role: true,
         },
       });
@@ -94,6 +147,7 @@ export class ParentService {
             fullName: true,
             phone: true,
             address: true,
+            parentRelation: true,
             role: true,
           },
         });
@@ -584,5 +638,379 @@ export class ParentService {
     }
 
     return out;
+  }
+
+  private async assertChildOwned(parentId: string, childId: string) {
+    const child = await this.prisma.child.findFirst({
+      where: { id: childId, parentId },
+      select: { id: true },
+    });
+    if (!child) throw new NotFoundException();
+    return child;
+  }
+
+  private mapFollowUpNoteForParent(note: {
+    id: string;
+    category: FollowUpNoteCategory;
+    content: string;
+    noteDate: Date;
+    createdAt: Date;
+    publishedAt: Date | null;
+  }) {
+    return {
+      id: note.id,
+      category: note.category,
+      content: note.content,
+      noteDate: note.noteDate.toISOString().slice(0, 10),
+      timeLabel: note.createdAt.toLocaleTimeString('fr-FR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      publishedAt: note.publishedAt?.toISOString() ?? null,
+    };
+  }
+
+  private mapHealthRecordForParent(
+    record: {
+      id: string;
+      childId: string;
+      bloodGroup: string | null;
+      doctorName: string | null;
+      doctorPhone: string | null;
+      knownAllergies: string | null;
+      ongoingTreatments: string | null;
+      dietaryRegime: string | null;
+      instructions: string | null;
+      schoolSignatureType: SchoolSignatureType | null;
+      schoolSignatureText: string | null;
+      schoolSignatureUrl: string | null;
+      schoolSignedAt: Date | null;
+      schoolSignedById: string | null;
+      parentSignatureUrl: string | null;
+      parentSignedAt: Date | null;
+      parentSignatureRequestedAt: Date | null;
+      vaccinations: {
+        id: string;
+        name: string;
+        status: VaccinationStatus;
+        vaccinatedAt: Date | null;
+      }[];
+    },
+    schoolSignedByName: string | null,
+  ) {
+    const schoolSigned = Boolean(record.schoolSignedAt);
+    const parentSigned = Boolean(record.parentSignedAt && record.parentSignatureUrl);
+    const awaitingParent =
+      !parentSigned &&
+      (Boolean(record.parentSignatureRequestedAt) || schoolSigned);
+    return {
+      id: record.id,
+      childId: record.childId,
+      bloodGroup: record.bloodGroup ?? '',
+      doctorName: record.doctorName ?? '',
+      doctorPhone: record.doctorPhone ?? '',
+      knownAllergies: record.knownAllergies ?? '',
+      ongoingTreatments: record.ongoingTreatments ?? '',
+      dietaryRegime: record.dietaryRegime ?? '',
+      instructions: record.instructions ?? '',
+      schoolSignatureType: record.schoolSignatureType,
+      schoolSignatureText: record.schoolSignatureText,
+      schoolSignatureUrl: record.schoolSignatureUrl,
+      schoolSignedAt: record.schoolSignedAt?.toISOString() ?? null,
+      schoolSignedByName,
+      schoolSigned,
+      parentSignatureUrl: record.parentSignatureUrl,
+      parentSignedAt: record.parentSignedAt?.toISOString() ?? null,
+      parentSigned,
+      parentSignatureRequestedAt: record.parentSignatureRequestedAt?.toISOString() ?? null,
+      awaitingParentSignature: awaitingParent,
+      vaccinations: record.vaccinations.map((v) => ({
+        id: v.id,
+        name: v.name,
+        status: v.status,
+        vaccinatedAt: v.vaccinatedAt ? v.vaccinatedAt.toISOString().slice(0, 10) : null,
+        dateLabel:
+          v.status === VaccinationStatus.DONE && v.vaccinatedAt
+            ? v.vaccinatedAt.toLocaleDateString('fr-FR', {
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+              })
+            : null,
+      })),
+    };
+  }
+
+  async getChildSpace(parentId: string, childId: string) {
+    await this.assertChildOwned(parentId, childId);
+
+    const [child, parentUser, notes, healthRecord] = await Promise.all([
+      this.prisma.child.findUniqueOrThrow({
+        where: { id: childId },
+        include: {
+          enrollments: {
+            orderBy: { createdAt: 'desc' },
+            include: { level: true, class: true },
+          },
+        },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: parentId },
+        select: {
+          fullName: true,
+          email: true,
+          phone: true,
+          address: true,
+          parentRelation: true,
+        },
+      }),
+      this.prisma.childFollowUpNote.findMany({
+        where: { childId, status: FollowUpNoteStatus.PUBLISHED },
+        orderBy: [{ noteDate: 'desc' }, { createdAt: 'desc' }],
+      }),
+      this.prisma.childHealthRecord.findUnique({
+        where: { childId },
+        include: {
+          vaccinations: { orderBy: { createdAt: 'asc' } },
+        },
+      }),
+    ]);
+
+    const enrollment =
+      child.enrollments.find((e) => e.status === EnrollmentStatus.APPROVED) ??
+      child.enrollments[0] ??
+      null;
+
+    const allergiesList = splitAllergies(child.allergies);
+    const parentRelLabel = parentRelationLabelFr(parentUser?.parentRelation);
+
+    let schoolSignedByName: string | null = null;
+    if (healthRecord?.schoolSignedById) {
+      const signer = await this.prisma.user.findUnique({
+        where: { id: healthRecord.schoolSignedById },
+        select: { fullName: true },
+      });
+      schoolSignedByName = signer?.fullName?.trim() || null;
+    }
+
+    return {
+      child: {
+        id: child.id,
+        firstName: child.firstName,
+        lastName: child.lastName,
+        fullName: `${child.firstName} ${child.lastName}`.trim(),
+        birthDate: child.birthDate?.toISOString() ?? null,
+        birthDisplay: child.birthDate
+          ? child.birthDate.toLocaleDateString('fr-FR', {
+              day: 'numeric',
+              month: 'long',
+              year: 'numeric',
+            })
+          : '—',
+        gender: child.gender,
+        genderLabel: genderLabelFr(child.gender),
+        ageLabel: ageLabelShort(child.birthDate),
+        allergies: allergiesList,
+        allergiesRaw: child.allergies,
+        matricule: matriculeFromChildId(child.id),
+        address: parentUser?.address?.trim() || null,
+      },
+      enrollment: enrollment
+        ? {
+            id: enrollment.id,
+            status: enrollment.status,
+            schoolYear: enrollment.schoolYear,
+            levelName: enrollment.level.name,
+            className: enrollment.class?.name ?? enrollment.level.name,
+            headTeacher: enrollment.class?.headTeacher?.trim() || null,
+            enrollmentDate: enrollment.createdAt.toISOString(),
+            enrollmentDateDisplay: enrollment.createdAt.toLocaleDateString('fr-FR', {
+              day: 'numeric',
+              month: 'long',
+              year: 'numeric',
+            }),
+          }
+        : null,
+      parent: parentUser
+        ? {
+            fullName: parentUser.fullName,
+            email: parentUser.email,
+            phone: parentUser.phone,
+            relationLabel: parentRelLabel,
+          }
+        : null,
+      followUpNotes: {
+        items: notes.map((n) => this.mapFollowUpNoteForParent(n)),
+      },
+      healthRecord: healthRecord
+        ? this.mapHealthRecordForParent(healthRecord, schoolSignedByName)
+        : null,
+    };
+  }
+
+  async signChildHealthRecord(parentId: string, childId: string, body: Record<string, unknown>) {
+    await this.assertChildOwned(parentId, childId);
+
+    const record = await this.prisma.childHealthRecord.findUnique({
+      where: { childId },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+    if (!record) {
+      throw new NotFoundException('Fiche santé introuvable.');
+    }
+    if (record.parentSignedAt && record.parentSignatureUrl) {
+      throw new BadRequestException('La fiche est déjà signée.');
+    }
+
+    const signatureDataUrl = String(body?.signatureDataUrl ?? '').trim();
+    if (!signatureDataUrl) {
+      throw new BadRequestException('Signature requise.');
+    }
+
+    const parentSignatureUrl = saveHealthRecordParentSignatureFromDataUrl(childId, signatureDataUrl);
+
+    const updated = await this.prisma.childHealthRecord.update({
+      where: { id: record.id },
+      data: {
+        parentSignatureUrl,
+        parentSignedAt: new Date(),
+      },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+
+    let schoolSignedByName: string | null = null;
+    if (updated.schoolSignedById) {
+      const signer = await this.prisma.user.findUnique({
+        where: { id: updated.schoolSignedById },
+        select: { fullName: true },
+      });
+      schoolSignedByName = signer?.fullName?.trim() || null;
+    }
+
+    return this.mapHealthRecordForParent(updated, schoolSignedByName);
+  }
+
+  private async ensureParentHealthRecord(parentId: string, childId: string) {
+    await this.assertChildOwned(parentId, childId);
+    const existing = await this.prisma.childHealthRecord.findUnique({
+      where: { childId },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+    if (existing) return existing;
+
+    const child = await this.prisma.child.findUnique({
+      where: { id: childId },
+      select: { allergies: true },
+    });
+    return this.prisma.childHealthRecord.create({
+      data: {
+        childId,
+        knownAllergies: child?.allergies?.trim() || null,
+      },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+  }
+
+  private async healthRecordWithSignerName(record: {
+    id: string;
+    childId: string;
+    bloodGroup: string | null;
+    doctorName: string | null;
+    doctorPhone: string | null;
+    knownAllergies: string | null;
+    ongoingTreatments: string | null;
+    dietaryRegime: string | null;
+    instructions: string | null;
+    schoolSignatureType: SchoolSignatureType | null;
+    schoolSignatureText: string | null;
+    schoolSignatureUrl: string | null;
+    schoolSignedAt: Date | null;
+    schoolSignedById: string | null;
+    parentSignatureUrl: string | null;
+    parentSignedAt: Date | null;
+    parentSignatureRequestedAt: Date | null;
+    vaccinations: {
+      id: string;
+      name: string;
+      status: VaccinationStatus;
+      vaccinatedAt: Date | null;
+    }[];
+  }) {
+    let schoolSignedByName: string | null = null;
+    if (record.schoolSignedById) {
+      const signer = await this.prisma.user.findUnique({
+        where: { id: record.schoolSignedById },
+        select: { fullName: true },
+      });
+      schoolSignedByName = signer?.fullName?.trim() || null;
+    }
+    return this.mapHealthRecordForParent(record, schoolSignedByName);
+  }
+
+  async updateChildHealthRecord(parentId: string, childId: string, body: Record<string, unknown>) {
+    const record = await this.ensureParentHealthRecord(parentId, childId);
+    const strField = (v: unknown) => String(v ?? '').trim() || null;
+
+    const vaccinationsIn = body.vaccinations;
+    const vaccinations = Array.isArray(vaccinationsIn)
+      ? vaccinationsIn
+          .map((row) => {
+            const r = row as Record<string, unknown>;
+            const name = String(r.name ?? '').trim();
+            if (!name) return null;
+            const statusRaw = String(r.status ?? 'MISSING').toUpperCase();
+            const status =
+              statusRaw === VaccinationStatus.DONE ? VaccinationStatus.DONE : VaccinationStatus.MISSING;
+            let vaccinatedAt: Date | null = null;
+            if (status === VaccinationStatus.DONE && r.vaccinatedAt) {
+              const raw = String(r.vaccinatedAt).trim();
+              const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+              if (m) {
+                const y = Number(m[1]);
+                const mo = Number(m[2]) - 1;
+                const d = Number(m[3]);
+                vaccinatedAt = new Date(Date.UTC(y, mo, d));
+              }
+            }
+            return { name, status, vaccinatedAt };
+          })
+          .filter(Boolean) as { name: string; status: VaccinationStatus; vaccinatedAt: Date | null }[]
+      : null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.childHealthRecord.update({
+        where: { id: record.id },
+        data: {
+          bloodGroup: strField(body.bloodGroup),
+          doctorName: strField(body.doctorName),
+          doctorPhone: strField(body.doctorPhone),
+          knownAllergies: strField(body.knownAllergies),
+          ongoingTreatments: strField(body.ongoingTreatments),
+          dietaryRegime: strField(body.dietaryRegime),
+          instructions: strField(body.instructions),
+        },
+      });
+
+      if (vaccinations) {
+        await tx.childVaccination.deleteMany({ where: { healthRecordId: record.id } });
+        if (vaccinations.length) {
+          await tx.childVaccination.createMany({
+            data: vaccinations.map((v) => ({
+              healthRecordId: record.id,
+              name: v.name,
+              status: v.status,
+              vaccinatedAt: v.vaccinatedAt,
+            })),
+          });
+        }
+      }
+    });
+
+    const full = await this.prisma.childHealthRecord.findUniqueOrThrow({
+      where: { id: record.id },
+      include: { vaccinations: { orderBy: { createdAt: 'asc' } } },
+    });
+
+    return this.healthRecordWithSignerName(full);
   }
 }

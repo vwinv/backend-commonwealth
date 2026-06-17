@@ -113,6 +113,18 @@ export class NotificationsService {
     });
   }
 
+  async notifyHealthSignatureRequest(parentId: string, childId: string, childName: string) {
+    await this.prisma.notification.create({
+      data: {
+        userId: parentId,
+        channel: `health-signature:${childId}:${Date.now()}`,
+        title: 'Signature fiche santé',
+        body: `Merci de signer la fiche santé de ${childName} depuis votre espace parent.`,
+        kind: 'HEALTH_SIGNATURE_REQUEST',
+      },
+    });
+  }
+
   async ensureOverduePaymentNotifications(userId: string) {
     const children = await this.prisma.child.findMany({
       where: { parentId: userId },

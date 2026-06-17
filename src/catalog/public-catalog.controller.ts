@@ -7,12 +7,22 @@ export class PublicCatalogController {
 
   @Get('levels')
   listLevels() {
-    return this.catalog.listLevels();
+    return this.catalog.listLevelsForEnrollment();
   }
 
   @Get('school-year/active')
   activeSchoolYear() {
     return this.catalog.activeSchoolYear();
+  }
+
+  @Get('levels/:levelId/schedules')
+  listLevelSchedules(@Param('levelId') levelId: string) {
+    return this.catalog.listLevelSchedulesForEnrollment(levelId);
+  }
+
+  @Get('services')
+  listServices() {
+    return this.catalog.listServicesForEnrollment();
   }
 
   @Get('levels/:levelId/classes')

@@ -7,11 +7,18 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
 import type { UserRole } from '@prisma/client';
+import type { AppModuleRole } from '@prisma/client';
 
 export type ParentJwtPayload = {
   sub: string;
   email: string;
   role: UserRole;
+};
+
+export type AdminJwtPayload = ParentJwtPayload & {
+  permissions?: AppModuleRole[];
+  mustChangePassword?: boolean;
+  jobTitle?: string | null;
 };
 
 @Injectable()

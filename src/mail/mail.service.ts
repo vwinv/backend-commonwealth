@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PaymentStatus, UserRole } from '@prisma/client';
-import { readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as nodemailer from 'nodemailer';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -20,6 +20,95 @@ function loginUrlFromConfig(config: ConfigService): string {
   );
 }
 
+function parentCredentialsRecapRows(
+  to: string,
+  plainPasswordForEmail: string | null,
+): MailRecapRow[] {
+  const rows: MailRecapRow[] = [
+    {
+      label: 'Identifiant espace parent',
+      value: escapeHtml(to),
+      valueTone: 'blue',
+    },
+  ];
+  if (plainPasswordForEmail) {
+    rows.push({
+      label: 'Mot de passe provisoire',
+      value: `<code style="background:#f1f5f9;padding:2px 8px;border-radius:4px;font-size:14px;">${escapeHtml(plainPasswordForEmail)}</code>`,
+      valueTone: 'blue',
+    });
+  }
+  return rows;
+}
+
+function parentCredentialsIntroHtml(
+  to: string,
+  plainPasswordForEmail: string | null,
+  loginUrl: string,
+): string {
+  if (plainPasswordForEmail) {
+    return `<div style="margin:0 0 18px;padding:16px 18px;border-radius:10px;border:2px solid #216EC2;background:#e9f5fc;">
+        <p style="margin:0 0 10px;font-size:15px;font-weight:700;color:#0f172a;">Vos identifiants espace parent</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;color:#1e293b;">
+          <tr>
+            <td style="padding:4px 12px 4px 0;vertical-align:top;color:#64748b;width:42%;">E-mail (identifiant)</td>
+            <td style="padding:4px 0;vertical-align:top;font-weight:700;color:#216EC2;">${escapeHtml(to)}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 12px 4px 0;vertical-align:top;color:#64748b;">Mot de passe provisoire</td>
+            <td style="padding:4px 0;vertical-align:top;">
+              <code style="background:#ffffff;padding:4px 10px;border-radius:6px;font-size:15px;font-weight:700;color:#0f172a;border:1px solid #cbd5e1;">${escapeHtml(plainPasswordForEmail)}</code>
+            </td>
+          </tr>
+        </table>
+        <p style="margin:12px 0 0;">
+          <a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:700;text-decoration:none;">→ Se connecter à l'espace parent</a>
+        </p>
+        <p style="margin:8px 0 0;font-size:13px;color:#475569;">Modifiez ce mot de passe après votre première connexion.</p>
+      </div>`;
+  }
+  return `<div style="margin:0 0 18px;padding:16px 18px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;">
+      <p style="margin:0 0 8px;font-size:15px;font-weight:700;color:#0f172a;">Espace parent</p>
+      <p style="margin:0 0 6px;font-size:14px;color:#1e293b;">
+        <strong>Identifiant :</strong> ${escapeHtml(to)}
+      </p>
+      <p style="margin:0 0 8px;font-size:14px;color:#475569;">
+        Connectez-vous avec le mot de passe déjà communiqué, ou utilisez « Mot de passe oublié » sur la page de connexion.
+      </p>
+      <p style="margin:0;">
+        <a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:700;text-decoration:none;">→ Se connecter à l'espace parent</a>
+      </p>
+    </div>`;
+}
+
+function parentCredentialsFooterHtml(
+  to: string,
+  plainPasswordForEmail: string | null,
+  loginUrl: string,
+): string {
+  if (plainPasswordForEmail) {
+    return `<p style="margin:0;">Conservez ces identifiants pour accéder à votre espace parent.</p>`;
+  }
+  return `<p style="margin:0;">Identifiant espace parent : <strong>${escapeHtml(to)}</strong></p>`;
+}
+
+function inscriptionResumeUrlFromConfig(config: ConfigService, resumeToken: string): string {
+  const explicit = config.get<string>('PUBLIC_INSCRIPTION_URL')?.trim();
+  if (explicit) {
+    const base = explicit.replace(/\/$/, '');
+    return `${base}?resume=${encodeURIComponent(resumeToken)}`;
+  }
+  const login = loginUrlFromConfig(config);
+  const site = login.replace(/\/parent\/login\/?$/i, '') || 'http://localhost:3000';
+  return `${site.replace(/\/$/, '')}/inscription?resume=${encodeURIComponent(resumeToken)}`;
+}
+
+function adminLoginUrlFromConfig(config: ConfigService): string {
+  return (
+    config.get<string>('ADMIN_PORTAL_LOGIN_URL')?.trim() || 'http://localhost:3000/admin/login'
+  );
+}
+
 export type PreEnrollmentMailParams = {
   to: string;
   parentName: string | null;
@@ -32,10 +121,44 @@ export type PreEnrollmentMailParams = {
   plainPasswordForEmail: string | null;
 };
 
+export type EnrollmentProgressMailParams = {
+  to: string;
+  parentName: string | null;
+  parentPhone?: string | null;
+  schoolYear: string;
+  childLine: string;
+  resumeUrl: string;
+  plainPasswordForEmail: string | null;
+};
+
+export type EnrollmentApprovedMailParams = {
+  to: string;
+  parentName: string | null;
+  parentPhone?: string | null;
+  schoolYear: string;
+  childLine: string;
+};
+
+export type HealthSignatureRequestMailParams = {
+  to: string;
+  parentName: string | null;
+  parentPhone?: string | null;
+  childName: string;
+};
+
 export type ParentPortalCredentialsParams = {
   to: string;
   parentName: string | null;
   password: string;
+};
+
+export type StaffPortalCredentialsParams = {
+  to: string;
+  fullName: string | null;
+  password: string;
+  jobTitle?: string | null;
+  /** Réinitialisation par un administrateur (texte d’e-mail adapté). */
+  isPasswordReset?: boolean;
 };
 
 export type PendingInvoiceLine = {
@@ -89,8 +212,8 @@ function buildMultipleUnpaidRecapTableHtml(lines: PendingInvoiceLine[], total: n
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  /** `undefined` = non résolu ; `null` = fichier absent ; sinon data URI ou URL. */
-  private logoSrcCache: string | null | undefined;
+  private static readonly LOGO_CID = 'commonwealth-logo@mail';
+  private resolvedLogoPathCache: string | null | undefined;
 
   constructor(
     private readonly config: ConfigService,
@@ -354,22 +477,54 @@ export class MailService {
   }
 
   /**
-   * Préfère MAIL_LOGO_URL si défini ; sinon logo du dépôt (même fichier que le front
-   * `assets/images/logo.png`), copié sous `src/mail/assets/logo.png` et embarqué en data URI.
+   * Logo pour les e-mails administratifs.
+   * Préfère MAIL_LOGO_URL (URL publique) ; sinon fichier embarqué en pièce jointe CID
+   * (compatible Gmail/Outlook — les data URI sont souvent bloquées).
    */
-  private logoUrl(): string | null {
+  private getMailLogo(): {
+    logoUrl: string | null;
+    attachments: { filename: string; path: string; cid: string }[];
+  } {
     const configured = this.config.get<string>('MAIL_LOGO_URL')?.trim();
-    if (configured) return configured;
-    if (this.logoSrcCache === null) return null;
-    if (this.logoSrcCache !== undefined) return this.logoSrcCache;
-    try {
-      const buf = readFileSync(join(__dirname, 'assets', 'logo.png'));
-      this.logoSrcCache = `data:image/png;base64,${buf.toString('base64')}`;
-      return this.logoSrcCache;
-    } catch {
-      this.logoSrcCache = null;
-      return null;
+    if (configured) {
+      return { logoUrl: configured, attachments: [] };
     }
+
+    const path = this.resolveLogoPath();
+    if (!path) {
+      this.logger.warn(
+        'Logo e-mail introuvable (définir MAIL_LOGO_URL ou placer logo.png dans src/mail/assets/).',
+      );
+      return { logoUrl: null, attachments: [] };
+    }
+
+    return {
+      logoUrl: `cid:${MailService.LOGO_CID}`,
+      attachments: [{ filename: 'logo.png', path, cid: MailService.LOGO_CID }],
+    };
+  }
+
+  /** Nest copie `src/mail/assets` vers `dist/mail/assets` ; le JS compilé est sous `dist/src/mail/`. */
+  private resolveLogoPath(): string | undefined {
+    if (this.resolvedLogoPathCache === null) return undefined;
+    if (this.resolvedLogoPathCache !== undefined) return this.resolvedLogoPathCache;
+
+    const cwd = process.cwd();
+    const candidates = [
+      join(__dirname, 'assets', 'logo.png'),
+      join(__dirname, '..', 'mail', 'assets', 'logo.png'),
+      join(__dirname, '..', '..', 'mail', 'assets', 'logo.png'),
+      join(cwd, 'dist', 'mail', 'assets', 'logo.png'),
+      join(cwd, 'src', 'mail', 'assets', 'logo.png'),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        this.resolvedLogoPathCache = p;
+        return p;
+      }
+    }
+    this.resolvedLogoPathCache = null;
+    return undefined;
   }
 
   private adminPhone(): string {
@@ -386,6 +541,7 @@ export class MailService {
       this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
 
     const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
     const subjectBold = `Confirmation de pré-inscription — Année ${params.schoolYear}`;
     const subject = `Commonwealth School — ${subjectBold}`;
 
@@ -399,21 +555,18 @@ export class MailService {
 
     const loginUrl = loginUrlFromConfig(this.config);
 
-    const credentialsHtml = params.plainPasswordForEmail
-      ? `<p>Vous pouvez dès maintenant accéder à votre <strong>espace parent</strong>&nbsp;:</p>
-        <ul style="margin:8px 0;padding-left:20px;">
-          <li><strong>E-mail (identifiant)</strong>&nbsp;: ${escapeHtml(params.to)}</li>
-          <li><strong>Mot de passe provisoire</strong>&nbsp;: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;">${escapeHtml(params.plainPasswordForEmail)}</code></li>
-        </ul>
-        <p><a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:600;">Se connecter à l’espace parent</a></p>
-        <p>Nous vous recommandons de <strong>modifier ce mot de passe</strong> après votre première connexion.</p>`
-      : `<p>Vous avez déjà un compte espace parent&nbsp;: connectez-vous avec le même e-mail et le mot de passe déjà communiqué.</p>
-        <p><a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:600;">Se connecter à l’espace parent</a></p>`;
+    const credentialsIntroHtml = parentCredentialsIntroHtml(
+      params.to,
+      params.plainPasswordForEmail,
+      loginUrl,
+    );
+    const credentialsHtml = parentCredentialsFooterHtml(params.to, params.plainPasswordForEmail, loginUrl);
 
     const introHtml = `
+      ${credentialsIntroHtml}
       <p style="margin:0 0 12px;">${greeting}</p>
-      <p style="margin:0 0 12px;">Nous avons bien enregistré votre <strong>demande de pré-inscription</strong> pour l’année scolaire <strong>${escapeHtml(params.schoolYear)}</strong>.</p>
-      <p style="margin:0;">Votre dossier est <strong>en attente de validation</strong> par l’administration. Vous recevrez un message dès que votre inscription aura été examinée.</p>`;
+      <p style="margin:0 0 12px;">Nous avons bien enregistré votre <strong>demande de pré-inscription</strong> pour l'année scolaire <strong>${escapeHtml(params.schoolYear)}</strong>.</p>
+      <p style="margin:0;">Votre dossier est <strong>en attente de validation</strong> par l'administration. Vous recevrez un message dès que votre inscription aura été examinée.</p>`;
 
     const recapRows: MailRecapRow[] = [
       { label: 'Année scolaire', value: escapeHtml(params.schoolYear) },
@@ -422,6 +575,7 @@ export class MailService {
         value: childrenHtml || '—',
       },
       { label: 'Statut du dossier', value: 'En attente de validation', valueTone: 'blue' },
+      ...parentCredentialsRecapRows(params.to, params.plainPasswordForEmail),
     ];
 
     const footerBodyHtml = `${credentialsHtml}
@@ -443,7 +597,7 @@ export class MailService {
       recapRows,
       footerBodyHtml,
       signatureBlockHtml,
-      logoUrl: this.logoUrl(),
+      logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
     };
@@ -457,6 +611,15 @@ export class MailService {
       introText: [
         params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
         '',
+        ...(params.plainPasswordForEmail
+          ? [
+              'Vos identifiants espace parent :',
+              `E-mail : ${params.to}`,
+              `Mot de passe provisoire : ${params.plainPasswordForEmail}`,
+              `Connexion : ${loginUrl}`,
+              '',
+            ]
+          : [`Identifiant espace parent : ${params.to}`, `Connexion : ${loginUrl}`, '']),
         `Nous avons bien enregistré votre demande de pré-inscription pour l'année scolaire ${params.schoolYear}.`,
         'Enfants concernés :',
         childrenText,
@@ -467,6 +630,10 @@ export class MailService {
         `Année scolaire: ${params.schoolYear}`,
         `Enfants: ${childrenText}`,
         'Statut: En attente de validation',
+        `Identifiant espace parent: ${params.to}`,
+        ...(params.plainPasswordForEmail
+          ? [`Mot de passe provisoire: ${params.plainPasswordForEmail}`]
+          : []),
       ],
       footerText: params.plainPasswordForEmail
         ? [
@@ -497,11 +664,345 @@ export class MailService {
         subject,
         text,
         html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail de pré-inscription envoyé à ${params.to}`);
       await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
     } catch (err) {
       this.logger.error(`Échec envoi e-mail à ${params.to}`, err instanceof Error ? err.stack : err);
+    }
+  }
+
+  /** Dossier d'inscription enregistré en cours de route (étape famille) — reprise possible plus tard. */
+  async sendEnrollmentProgressSaved(params: EnrollmentProgressMailParams): Promise<void> {
+    const from =
+      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const subjectBold = `Dossier d'inscription enregistré — Année ${params.schoolYear}`;
+    const subject = `Commonwealth School — ${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || 'Parent';
+    const greeting = params.parentName?.trim()
+      ? `Bonjour ${escapeHtml(params.parentName.trim())},`
+      : 'Bonjour,';
+
+    const loginUrl = loginUrlFromConfig(this.config);
+
+    const credentialsIntroHtml = parentCredentialsIntroHtml(
+      params.to,
+      params.plainPasswordForEmail,
+      loginUrl,
+    );
+    const credentialsHtml = parentCredentialsFooterHtml(params.to, params.plainPasswordForEmail, loginUrl);
+
+    const introHtml = `
+      ${credentialsIntroHtml}
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0 0 12px;">Nous avons bien <strong>enregistré votre dossier d'inscription</strong> pour l'année scolaire <strong>${escapeHtml(params.schoolYear)}</strong>.</p>
+      <p style="margin:0;">Vous pouvez <strong>terminer l'inscription quand vous le souhaitez</strong> (fiche médicale, options, validation) via le lien ci-dessous.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'Année scolaire', value: escapeHtml(params.schoolYear) },
+      { label: 'Enfant', value: escapeHtml(params.childLine) },
+      { label: 'État du dossier', value: 'À compléter', valueTone: 'blue' },
+      ...parentCredentialsRecapRows(params.to, params.plainPasswordForEmail),
+    ];
+
+    const footerBodyHtml = `${credentialsHtml}
+      <p style="margin:16px 0 12px;"><a href="${escapeHtml(params.resumeUrl)}" style="display:inline-block;padding:12px 24px;background:#216EC2;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;">Reprendre mon inscription</a></p>
+      <p style="margin:0;">Conservez ce lien pour reprendre sur un autre appareil. Pour toute question, contactez le service administratif.</p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      Commonwealth School<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: params.parentPhone?.trim() || null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName, params.parentPhone?.trim()].filter(Boolean).join(' · '),
+      introText: [
+        params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+        '',
+        ...(params.plainPasswordForEmail
+          ? [
+              'VOS IDENTIFIANTS ESPACE PARENT',
+              `E-mail (identifiant) : ${params.to}`,
+              `Mot de passe provisoire : ${params.plainPasswordForEmail}`,
+              `Connexion : ${loginUrl}`,
+              '',
+            ]
+          : [`Identifiant espace parent : ${params.to}`, `Connexion : ${loginUrl}`, '']),
+        `Nous avons bien enregistré votre dossier d'inscription pour l'année scolaire ${params.schoolYear}.`,
+        `Enfant : ${params.childLine}`,
+        '',
+        "Vous pouvez terminer l'inscription quand vous le souhaitez via le lien ci-dessous.",
+      ].join('\n'),
+      recapLines: [
+        `Année scolaire: ${params.schoolYear}`,
+        `Enfant: ${params.childLine}`,
+        'État: À compléter',
+        `Identifiant espace parent: ${params.to}`,
+        ...(params.plainPasswordForEmail
+          ? [`Mot de passe provisoire: ${params.plainPasswordForEmail}`]
+          : []),
+      ],
+      footerText: [
+        params.plainPasswordForEmail
+          ? `Espace parent — E-mail : ${params.to} — Mot de passe provisoire : ${params.plainPasswordForEmail}`
+          : `Espace parent : ${loginUrl}`,
+        `Reprendre l'inscription : ${params.resumeUrl}`,
+      ].join('\n'),
+      signatureText: [
+        'Service administratif',
+        'Commonwealth School',
+        this.adminDisplayEmail(),
+        this.adminPhone(),
+      ].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+    });
+
+    if (!transport) {
+      this.logger.warn(`E-mail non envoyé (SMTP non configuré). Destinataire : ${params.to}`);
+      return;
+    }
+
+    try {
+      await transport.sendMail({
+        from,
+        to: params.to,
+        subject,
+        text,
+        html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(`E-mail de reprise d'inscription envoyé à ${params.to}`);
+      await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
+    } catch (err) {
+      this.logger.error(`Échec envoi e-mail à ${params.to}`, err instanceof Error ? err.stack : err);
+    }
+  }
+
+  /** Confirmation d’approbation d’inscription (même format administratif que la pré-inscription). */
+  async sendEnrollmentApprovedConfirmation(params: EnrollmentApprovedMailParams): Promise<void> {
+    const from =
+      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const subjectBold = `Inscription approuvée — Année ${params.schoolYear}`;
+    const subject = `Commonwealth School — ${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || 'Parent';
+    const greeting = params.parentName?.trim()
+      ? `Bonjour ${escapeHtml(params.parentName.trim())},`
+      : 'Bonjour,';
+
+    const introHtml = `
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0 0 12px;">Nous vous confirmons que votre demande d’inscription pour l’année scolaire <strong>${escapeHtml(params.schoolYear)}</strong> a été <strong>approuvée</strong> par l’administration.</p>
+      <p style="margin:0;">Vous pouvez consulter votre espace parent pour le suivi et les paiements associés.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'Année scolaire', value: escapeHtml(params.schoolYear) },
+      { label: 'Élève concerné', value: escapeHtml(params.childLine) || '—' },
+      { label: 'Statut du dossier', value: 'Inscription approuvée', valueTone: 'blue' },
+    ];
+
+    const loginUrl = loginUrlFromConfig(this.config);
+    const footerBodyHtml = `
+      <p style="margin:0 0 12px;">Accédez à votre espace parent pour suivre le dossier et procéder au règlement des frais de scolarité.</p>
+      <p style="margin:0;"><a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:600;">Se connecter à l’espace parent</a></p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      Commonwealth School<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: params.parentPhone?.trim() || null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName, params.parentPhone?.trim()].filter(Boolean).join(' · '),
+      introText: [
+        params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+        '',
+        `Votre demande d'inscription pour l'année scolaire ${params.schoolYear} a été approuvée.`,
+        '',
+        `Élève concerné : ${params.childLine}`,
+        '',
+        `Connexion espace parent : ${loginUrl}`,
+      ].join('\n'),
+      recapLines: [
+        `Année scolaire: ${params.schoolYear}`,
+        `Élève concerné: ${params.childLine}`,
+        'Statut: Inscription approuvée',
+      ],
+      footerText: `Connexion espace parent : ${loginUrl}`,
+      signatureText: [
+        'Service administratif',
+        'Commonwealth School',
+        this.adminDisplayEmail(),
+        this.adminPhone(),
+      ].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+    });
+
+    if (!transport) {
+      this.logger.warn(`E-mail approbation non envoyé (SMTP non configuré). Destinataire : ${params.to}`);
+      return;
+    }
+
+    try {
+      await transport.sendMail({
+        from,
+        to: params.to,
+        subject,
+        text,
+        html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(`E-mail approbation envoyé à ${params.to}`);
+      await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
+    } catch (err) {
+      this.logger.error(`Échec envoi e-mail approbation à ${params.to}`, err instanceof Error ? err.stack : err);
+    }
+  }
+
+  /** Demande de signature de la fiche santé (espace parent). */
+  async sendHealthSignatureRequest(params: HealthSignatureRequestMailParams): Promise<void> {
+    const from =
+      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const subjectBold = `Signature fiche santé — ${params.childName}`;
+    const subject = `Commonwealth School — ${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || 'Parent';
+    const greeting = params.parentName?.trim()
+      ? `Bonjour ${escapeHtml(params.parentName.trim())},`
+      : 'Bonjour,';
+
+    const loginUrl = loginUrlFromConfig(this.config);
+
+    const introHtml = `
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0 0 12px;">L’école vous invite à <strong>signer la fiche santé</strong> de <strong>${escapeHtml(params.childName)}</strong>.</p>
+      <p style="margin:0;">Connectez-vous à votre espace parent pour consulter la fiche et déposer votre signature.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'Élève concerné', value: escapeHtml(params.childName) },
+      { label: 'Action attendue', value: 'Signature de la fiche santé', valueTone: 'blue' },
+    ];
+
+    const footerBodyHtml = `
+      <p style="margin:0 0 12px;">Rendez-vous dans votre espace parent pour valider la fiche santé de votre enfant.</p>
+      <p style="margin:0;"><a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:600;">Se connecter à l’espace parent</a></p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      Commonwealth School<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: params.parentPhone?.trim() || null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName, params.parentPhone?.trim()].filter(Boolean).join(' · '),
+      introText: [
+        params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+        '',
+        `Merci de signer la fiche santé de ${params.childName}.`,
+        '',
+        `Connexion espace parent : ${loginUrl}`,
+      ].join('\n'),
+      recapLines: [`Élève concerné: ${params.childName}`, 'Action: Signature fiche santé'],
+      footerText: `Connexion espace parent : ${loginUrl}`,
+      signatureText: [
+        'Service administratif',
+        'Commonwealth School',
+        this.adminDisplayEmail(),
+        this.adminPhone(),
+      ].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+    });
+
+    if (!transport) {
+      this.logger.warn(`E-mail fiche santé non envoyé (SMTP non configuré). Destinataire : ${params.to}`);
+      return;
+    }
+
+    try {
+      await transport.sendMail({
+        from,
+        to: params.to,
+        subject,
+        text,
+        html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(`E-mail demande signature fiche santé envoyé à ${params.to}`);
+      await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
+    } catch (err) {
+      this.logger.error(
+        `Échec envoi e-mail fiche santé à ${params.to}`,
+        err instanceof Error ? err.stack : err,
+      );
     }
   }
 
@@ -511,6 +1012,7 @@ export class MailService {
       this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
 
     const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
     const subjectBold = `Rappel de paiement — ${params.totalUnpaid} factures impayées`;
     const subject = `Commonwealth School — ${subjectBold}`;
 
@@ -552,7 +1054,7 @@ export class MailService {
       recapHtmlOverride,
       footerBodyHtml,
       signatureBlockHtml,
-      logoUrl: this.logoUrl(),
+      logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
     };
@@ -602,6 +1104,7 @@ export class MailService {
         subject,
         text,
         html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail relance factures impayées (>3) envoyé à ${params.to}`);
       if (params.notifyAfterSend !== false) {
@@ -671,6 +1174,138 @@ export class MailService {
       await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
     } catch (err) {
       this.logger.error(`Échec envoi identifiants à ${params.to}`, err instanceof Error ? err.stack : err);
+    }
+  }
+
+  /** Compte personnel admin créé ou mot de passe réinitialisé : gabarit messagerie administrative. */
+  async sendStaffPortalCredentials(params: StaffPortalCredentialsParams): Promise<boolean> {
+    const from =
+      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+    const loginUrl = adminLoginUrlFromConfig(this.config);
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const isReset = Boolean(params.isPasswordReset);
+    const subjectBold = isReset
+      ? 'Réinitialisation de votre mot de passe — Espace de gestion'
+      : 'Vos identifiants — Espace de gestion';
+    const subject = `Commonwealth School — ${subjectBold}`;
+
+    const displayName = params.fullName?.trim() || params.to;
+    const greeting = params.fullName?.trim()
+      ? `Bonjour ${escapeHtml(params.fullName.trim())},`
+      : 'Bonjour,';
+
+    const introHtml = isReset
+      ? `<p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0;">Votre mot de passe d’accès à l’<strong>espace de gestion</strong> a été réinitialisé par un administrateur. Utilisez les informations ci-dessous pour vous reconnecter.</p>`
+      : `<p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0;">Un compte vous a été ouvert sur l’<strong>espace de gestion</strong> de Commonwealth Preschool of Abidjan. Retrouvez ci-dessous vos identifiants de connexion.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      ...(params.jobTitle?.trim()
+        ? [{ label: 'Poste / fonction', value: escapeHtml(params.jobTitle.trim()) }]
+        : []),
+      { label: 'Identifiant (e-mail)', value: escapeHtml(params.to) },
+      {
+        label: 'Mot de passe temporaire',
+        value: `<span style="display:inline-block;margin-top:2px;padding:6px 12px;background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;font-family:Consolas,Monaco,monospace;font-size:16px;font-weight:700;color:#0f172a;letter-spacing:0.06em;">${escapeHtml(params.password)}</span>`,
+      },
+      {
+        label: 'Lien de connexion',
+        value: `<a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:700;text-decoration:none;">${escapeHtml(loginUrl)}</a>`,
+      },
+    ];
+
+    const footerBodyHtml = `
+      <div style="margin:0 0 20px;padding:14px 16px;background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;font-size:14px;line-height:1.6;color:#78350f;">
+        <strong style="color:#92400e;display:block;margin-bottom:6px;">Important — sécurité du compte</strong>
+        Lors de votre prochaine connexion, le système vous demandera de définir un <strong>nouveau mot de passe personnel</strong> avant d’utiliser l’application.
+      </div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 18px;">
+        <tr>
+          <td align="center" style="border-radius:10px;background:#216EC2;">
+            <a href="${escapeHtml(loginUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:14px 32px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Se connecter à l’espace de gestion</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.65;">
+        Conservez ce message en lieu sûr ou supprimez-le après votre première connexion. Pour toute assistance, contactez le service administratif aux coordonnées ci-dessous.
+      </p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      Commonwealth Preschool of Abidjan<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+
+    const introPlain = isReset
+      ? 'Votre mot de passe d’accès à l’espace de gestion a été réinitialisé.'
+      : 'Un compte vous a été créé sur l’espace de gestion Commonwealth.';
+
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName].filter(Boolean).join(' · '),
+      introText: [
+        params.fullName?.trim() ? `Bonjour ${params.fullName.trim()},` : 'Bonjour,',
+        '',
+        introPlain,
+        '',
+      ].join('\n'),
+      recapLines: [
+        ...(params.jobTitle?.trim() ? [`Poste : ${params.jobTitle.trim()}`] : []),
+        `Identifiant (e-mail) : ${params.to}`,
+        `Mot de passe temporaire : ${params.password}`,
+        `Connexion : ${loginUrl}`,
+        '',
+        'À la prochaine connexion, vous devrez choisir un nouveau mot de passe personnel.',
+      ],
+      footerText: 'Cordialement,',
+      signatureText: `Service administratif — Commonwealth Preschool of Abidjan — ${this.adminDisplayEmail()} — ${this.adminPhone()}`,
+      emergencyPhone: this.emergencyPhone(),
+    });
+
+    if (!transport) {
+      this.logger.warn(
+        `E-mail identifiants personnel non envoyé (SMTP non configuré). Destinataire : ${params.to}`,
+      );
+      return false;
+    }
+
+    try {
+      await transport.sendMail({
+        from,
+        to: params.to,
+        subject,
+        text,
+        html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(`E-mail identifiants personnel envoyé à ${params.to}`);
+      return true;
+    } catch (err) {
+      this.logger.error(
+        `Échec envoi identifiants personnel à ${params.to}`,
+        err instanceof Error ? err.stack : err,
+      );
+      return false;
     }
   }
 }

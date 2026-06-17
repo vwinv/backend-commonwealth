@@ -1,5 +1,8 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import type { Request } from 'express';
 import { AuthService } from './auth.service';
+import { AdminJwtGuard, type AdminJwtPayload } from './admin-jwt.guard';
+import { SkipMustChangePassword } from './skip-must-change-password.decorator';
 
 @Controller('auth')
 export class AuthController {
@@ -13,5 +16,22 @@ export class AuthController {
   @Post('admin/login')
   adminLogin(@Body() body: { email?: string; password?: string }) {
     return this.auth.adminLogin(body);
+  }
+
+  @Get('admin/me')
+  @UseGuards(AdminJwtGuard)
+  @SkipMustChangePassword()
+  adminMe(@Req() req: Request & { adminUser?: AdminJwtPayload }) {
+    return this.auth.adminSession(req.adminUser!.sub);
+  }
+
+  @Patch('admin/me/password')
+  @UseGuards(AdminJwtGuard)
+  @SkipMustChangePassword()
+  adminChangePassword(
+    @Req() req: Request & { adminUser?: AdminJwtPayload },
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.auth.adminChangePassword(req.adminUser!.sub, body);
   }
 }

@@ -76,12 +76,23 @@ export class PricingController {
     if (!Number.isInteger(monthlyAmountCents) || monthlyAmountCents < 0) {
       throw new BadRequestException('monthlyAmountCents must be a non-negative integer (centimes)');
     }
-    return this.prisma.serviceLevelPrice.upsert({
-      where: {
-        schoolYear_levelId_serviceTariffId: { schoolYear, levelId, serviceTariffId },
-      },
-      update: { monthlyAmountCents },
-      create: { schoolYear, levelId, serviceTariffId, monthlyAmountCents },
+    const variantId =
+      body?.variantId === undefined || body?.variantId === null || body?.variantId === ''
+        ? null
+        : String(body.variantId).trim();
+
+    const existing = await this.prisma.serviceLevelPrice.findFirst({
+      where: { schoolYear, levelId, serviceTariffId, variantId },
+    });
+    if (existing) {
+      return this.prisma.serviceLevelPrice.update({
+        where: { id: existing.id },
+        data: { monthlyAmountCents },
+        include: { serviceTariff: true, level: true },
+      });
+    }
+    return this.prisma.serviceLevelPrice.create({
+      data: { schoolYear, levelId, serviceTariffId, variantId, monthlyAmountCents },
       include: { serviceTariff: true, level: true },
     });
   }

@@ -78,7 +78,7 @@ export function buildAdministrativeEmailHtml(c: AdministrativeMailContent): stri
     : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">${recapRowsOnly}</table>`;
 
   const logoBlock = c.logoUrl?.trim()
-    ? `<img src="${escapeHtml(c.logoUrl.trim())}" alt="Commonwealth School" width="72" height="72" style="display:block;border:0;border-radius:4px;" />`
+    ? `<img src="${escapeHtml(c.logoUrl.trim())}" alt="Commonwealth School" width="72" height="72" style="display:block;border:0;border-radius:4px;object-fit:contain;" />`
     : `<div style="width:72px;height:72px;border-radius:8px;background:#fef3c7;border:1px solid #fcd34d;display:flex;align-items:center;justify-content:center;font-size:10px;color:#92400e;text-align:center;padding:4px;">CWS</div>`;
 
   const adminPhone = c.adminPhone?.trim() || '(307) 555-0133';
