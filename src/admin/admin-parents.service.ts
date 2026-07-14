@@ -177,6 +177,7 @@ export class AdminParentsService {
           name: `${c.firstName} ${c.lastName}`.trim(),
           className: e ? e.class?.name ?? e.level.name : '—',
           schoolYear: e?.schoolYear ?? '—',
+          canViewStudent: Boolean(e),
         };
       }),
     };

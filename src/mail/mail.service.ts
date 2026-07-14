@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import * as nodemailer from 'nodemailer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { readSchoolContact } from '../config/school-contact';
 import {
   buildAdministrativeEmailHtml,
   buildAdministrativeEmailText,
@@ -469,11 +470,16 @@ export class MailService {
     });
   }
 
+  private schoolDisplayName(): string {
+    return readSchoolContact(this.config).displayName;
+  }
+
+  private mailFromDefault(): string {
+    return `${this.schoolDisplayName()} <noreply@commonwealth.local>`;
+  }
+
   private adminDisplayEmail(): string {
-    return (
-      this.config.get<string>('MAIL_ADMIN_DISPLAY_EMAIL')?.trim() ||
-      'administration@commonwealth-school.com'
-    );
+    return readSchoolContact(this.config).directionEmail;
   }
 
   /**
@@ -528,22 +534,22 @@ export class MailService {
   }
 
   private adminPhone(): string {
-    return this.config.get<string>('MAIL_ADMIN_PHONE')?.trim() || '(307) 555-0133';
+    return readSchoolContact(this.config).adminPhone;
   }
 
   private emergencyPhone(): string {
-    return this.config.get<string>('MAIL_EMERGENCY_PHONE')?.trim() || '(219) 555-0114';
+    return readSchoolContact(this.config).emergencyPhone;
   }
 
   /** Confirmation de pré-inscription (statut en attente côté administration). */
   async sendPreEnrollmentConfirmation(params: PreEnrollmentMailParams): Promise<void> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
 
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Confirmation de pré-inscription — Année ${params.schoolYear}`;
-    const subject = `Commonwealth School — ${subjectBold}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
 
     const displayName = params.parentName?.trim() || 'Parent';
     const greeting = params.parentName?.trim()
@@ -583,7 +589,7 @@ export class MailService {
 
     const signatureBlockHtml = `
       <strong style="font-size:15px;">Service administratif</strong><br />
-      Commonwealth School<br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
       <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
       ${escapeHtml(this.adminPhone())}`;
 
@@ -600,6 +606,7 @@ export class MailService {
       logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     };
 
     const html = buildAdministrativeEmailHtml(layout);
@@ -645,11 +652,12 @@ export class MailService {
         : `Connexion espace parent : ${loginUrl}`,
       signatureText: [
         'Service administratif',
-        'Commonwealth School',
+        this.schoolDisplayName(),
         this.adminDisplayEmail(),
         this.adminPhone(),
       ].join('\n'),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     });
 
     if (!transport) {
@@ -676,12 +684,12 @@ export class MailService {
   /** Dossier d'inscription enregistré en cours de route (étape famille) — reprise possible plus tard. */
   async sendEnrollmentProgressSaved(params: EnrollmentProgressMailParams): Promise<void> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
 
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Dossier d'inscription enregistré — Année ${params.schoolYear}`;
-    const subject = `Commonwealth School — ${subjectBold}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
 
     const displayName = params.parentName?.trim() || 'Parent';
     const greeting = params.parentName?.trim()
@@ -716,7 +724,7 @@ export class MailService {
 
     const signatureBlockHtml = `
       <strong style="font-size:15px;">Service administratif</strong><br />
-      Commonwealth School<br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
       <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
       ${escapeHtml(this.adminPhone())}`;
 
@@ -733,6 +741,7 @@ export class MailService {
       logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     };
 
     const html = buildAdministrativeEmailHtml(layout);
@@ -775,11 +784,12 @@ export class MailService {
       ].join('\n'),
       signatureText: [
         'Service administratif',
-        'Commonwealth School',
+        this.schoolDisplayName(),
         this.adminDisplayEmail(),
         this.adminPhone(),
       ].join('\n'),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     });
 
     if (!transport) {
@@ -806,12 +816,12 @@ export class MailService {
   /** Confirmation d’approbation d’inscription (même format administratif que la pré-inscription). */
   async sendEnrollmentApprovedConfirmation(params: EnrollmentApprovedMailParams): Promise<void> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
 
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Inscription approuvée — Année ${params.schoolYear}`;
-    const subject = `Commonwealth School — ${subjectBold}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
 
     const displayName = params.parentName?.trim() || 'Parent';
     const greeting = params.parentName?.trim()
@@ -836,7 +846,7 @@ export class MailService {
 
     const signatureBlockHtml = `
       <strong style="font-size:15px;">Service administratif</strong><br />
-      Commonwealth School<br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
       <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
       ${escapeHtml(this.adminPhone())}`;
 
@@ -853,6 +863,7 @@ export class MailService {
       logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     };
 
     const html = buildAdministrativeEmailHtml(layout);
@@ -878,11 +889,12 @@ export class MailService {
       footerText: `Connexion espace parent : ${loginUrl}`,
       signatureText: [
         'Service administratif',
-        'Commonwealth School',
+        this.schoolDisplayName(),
         this.adminDisplayEmail(),
         this.adminPhone(),
       ].join('\n'),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     });
 
     if (!transport) {
@@ -909,12 +921,12 @@ export class MailService {
   /** Demande de signature de la fiche santé (espace parent). */
   async sendHealthSignatureRequest(params: HealthSignatureRequestMailParams): Promise<void> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
 
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Signature fiche santé — ${params.childName}`;
-    const subject = `Commonwealth School — ${subjectBold}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
 
     const displayName = params.parentName?.trim() || 'Parent';
     const greeting = params.parentName?.trim()
@@ -939,7 +951,7 @@ export class MailService {
 
     const signatureBlockHtml = `
       <strong style="font-size:15px;">Service administratif</strong><br />
-      Commonwealth School<br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
       <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
       ${escapeHtml(this.adminPhone())}`;
 
@@ -956,6 +968,7 @@ export class MailService {
       logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     };
 
     const html = buildAdministrativeEmailHtml(layout);
@@ -975,11 +988,12 @@ export class MailService {
       footerText: `Connexion espace parent : ${loginUrl}`,
       signatureText: [
         'Service administratif',
-        'Commonwealth School',
+        this.schoolDisplayName(),
         this.adminDisplayEmail(),
         this.adminPhone(),
       ].join('\n'),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     });
 
     if (!transport) {
@@ -1009,12 +1023,12 @@ export class MailService {
   /** Relance lorsque le parent a plus de trois factures impayées (design identique à la messagerie administrative). */
   async sendParentMultipleUnpaidInvoicesReminder(params: MultipleUnpaidInvoicesMailParams): Promise<boolean> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
 
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Rappel de paiement — ${params.totalUnpaid} factures impayées`;
-    const subject = `Commonwealth School — ${subjectBold}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
 
     const displayName = params.parentName?.trim() || 'Parent';
     const greeting = params.parentName?.trim()
@@ -1039,7 +1053,7 @@ export class MailService {
 
     const signatureBlockHtml = `
       <strong style="font-size:15px;">Service administratif</strong><br />
-      Commonwealth School<br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
       <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
       ${escapeHtml(this.adminPhone())}`;
 
@@ -1057,6 +1071,7 @@ export class MailService {
       logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     };
 
     const html = buildAdministrativeEmailHtml(layout);
@@ -1085,11 +1100,12 @@ export class MailService {
       footerText: `Espace parent (paiements) : ${portalUrl}`,
       signatureText: [
         'Service administratif',
-        'Commonwealth School',
+        this.schoolDisplayName(),
         this.adminDisplayEmail(),
         this.adminPhone(),
       ].join('\n'),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     });
 
     if (!transport) {
@@ -1120,12 +1136,12 @@ export class MailService {
   /** Envoyé après validation admin : mot de passe provisoire pour l’espace parent. */
   async sendParentPortalCredentials(params: ParentPortalCredentialsParams): Promise<void> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
 
     const loginUrl = loginUrlFromConfig(this.config);
 
     const transport = this.createTransport();
-    const subject = 'Commonwealth School — Votre espace parent';
+    const subject = `${this.schoolDisplayName()} — Votre espace parent`;
 
     const greeting = params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,';
 
@@ -1142,7 +1158,7 @@ export class MailService {
       'Pour des raisons de sécurité, nous vous recommandons de changer ce mot de passe après votre première connexion.',
       '',
       'Cordialement,',
-      'Commonwealth School',
+      this.schoolDisplayName(),
     ].join('\n');
 
     const html = `
@@ -1157,7 +1173,7 @@ export class MailService {
   </ul>
   <p><a href="${escapeHtml(loginUrl)}">Se connecter</a></p>
   <p>Pour des raisons de sécurité, changez ce mot de passe après votre première connexion.</p>
-  <p>Cordialement,<br/>Commonwealth School</p>
+  <p>Cordialement,<br/>${escapeHtml(this.schoolDisplayName())}</p>
 </body>
 </html>`;
 
@@ -1180,7 +1196,7 @@ export class MailService {
   /** Compte personnel admin créé ou mot de passe réinitialisé : gabarit messagerie administrative. */
   async sendStaffPortalCredentials(params: StaffPortalCredentialsParams): Promise<boolean> {
     const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || 'Commonwealth School <noreply@commonwealth.local>';
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
     const loginUrl = adminLoginUrlFromConfig(this.config);
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
@@ -1188,7 +1204,7 @@ export class MailService {
     const subjectBold = isReset
       ? 'Réinitialisation de votre mot de passe — Espace de gestion'
       : 'Vos identifiants — Espace de gestion';
-    const subject = `Commonwealth School — ${subjectBold}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
 
     const displayName = params.fullName?.trim() || params.to;
     const greeting = params.fullName?.trim()
@@ -1251,6 +1267,7 @@ export class MailService {
       logoUrl: mailLogo.logoUrl,
       adminPhone: this.adminPhone(),
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     };
 
     const html = buildAdministrativeEmailHtml(layout);
@@ -1280,6 +1297,7 @@ export class MailService {
       footerText: 'Cordialement,',
       signatureText: `Service administratif — Commonwealth Preschool of Abidjan — ${this.adminDisplayEmail()} — ${this.adminPhone()}`,
       emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
     });
 
     if (!transport) {

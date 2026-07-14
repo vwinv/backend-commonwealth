@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer';
 import { PrismaService } from '../prisma/prisma.service';
+import { readSchoolContact } from '../config/school-contact';
 import {
   buildParentInvoiceHtml,
   formatXofFromCents,
@@ -55,19 +56,13 @@ export class ParentInvoicePdfService {
   ) {}
 
   private branding() {
+    const c = readSchoolContact(this.config);
     return {
-      schoolDisplayName:
-        this.config.get<string>('SCHOOL_DISPLAY_NAME')?.trim() || 'Commonwealth School',
-      contactEmail:
-        this.config.get<string>('SCHOOL_CONTACT_EMAIL')?.trim() || 'contact@commonwealth-school.com',
-      emergencyPhone:
-        this.config.get<string>('SCHOOL_EMERGENCY_PHONE')?.trim() || '(219) 555-0114',
-      administrationEmail:
-        this.config.get<string>('SCHOOL_ADMINISTRATION_EMAIL')?.trim() ||
-        'administration@commonwealth-school.com',
-      paymentModesLine:
-        this.config.get<string>('SCHOOL_PAYMENT_MODES')?.trim() ||
-        "Virement bancaire · Wave · Orange Money · Espèces (caisse de l'école)",
+      schoolDisplayName: c.displayName,
+      contactEmail: c.contactEmail,
+      emergencyPhone: c.emergencyPhone,
+      administrationEmail: c.administrationEmail,
+      paymentModesLine: c.paymentModes,
     };
   }
 

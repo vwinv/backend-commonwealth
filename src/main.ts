@@ -8,6 +8,7 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const uploadRoot = join(process.cwd(), 'uploads');
   mkdirSync(join(uploadRoot, 'documents'), { recursive: true });
+  mkdirSync(join(uploadRoot, 'ateliers'), { recursive: true });
   mkdirSync(join(uploadRoot, 'health-signatures'), { recursive: true });
   mkdirSync(join(uploadRoot, 'enrollment-signatures'), { recursive: true });
 

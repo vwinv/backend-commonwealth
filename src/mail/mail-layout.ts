@@ -1,7 +1,9 @@
 /**
- * Gabarit e-mail « messagerie administrative » (Commonwealth School).
+ * Gabarit e-mail « messagerie administrative » (Commonwealth Preschool of Abidjan).
  * Styles en ligne pour compatibilité clients mail.
  */
+
+import { SCHOOL_CONTACT_DEFAULTS } from '../config/school-contact';
 
 /** Bleu marque des e-mails administratifs */
 const MAIL_BLUE = '#216EC2';
@@ -38,6 +40,8 @@ export type AdministrativeMailContent = {
   adminPhone?: string;
   /** Numéro d’urgence (pied de page). */
   emergencyPhone?: string;
+  /** Nom affiché de l'établissement. */
+  schoolDisplayName?: string;
 };
 
 export function escapeHtml(s: string): string {
@@ -77,12 +81,14 @@ export function buildAdministrativeEmailHtml(c: AdministrativeMailContent): stri
     ? c.recapHtmlOverride.trim()
     : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">${recapRowsOnly}</table>`;
 
+  const schoolName = c.schoolDisplayName?.trim() || SCHOOL_CONTACT_DEFAULTS.displayName;
+  const adminPhone = c.adminPhone?.trim() || SCHOOL_CONTACT_DEFAULTS.phone;
+  const emergency = c.emergencyPhone?.trim() || SCHOOL_CONTACT_DEFAULTS.phone;
+
   const logoBlock = c.logoUrl?.trim()
-    ? `<img src="${escapeHtml(c.logoUrl.trim())}" alt="Commonwealth School" width="72" height="72" style="display:block;border:0;border-radius:4px;object-fit:contain;" />`
+    ? `<img src="${escapeHtml(c.logoUrl.trim())}" alt="${escapeHtml(schoolName)}" width="72" height="72" style="display:block;border:0;border-radius:4px;object-fit:contain;" />`
     : `<div style="width:72px;height:72px;border-radius:8px;background:#fef3c7;border:1px solid #fcd34d;display:flex;align-items:center;justify-content:center;font-size:10px;color:#92400e;text-align:center;padding:4px;">CWS</div>`;
 
-  const adminPhone = c.adminPhone?.trim() || '(307) 555-0133';
-  const emergency = c.emergencyPhone?.trim() || '(219) 555-0114';
   const generated = new Date().toLocaleString('fr-FR', {
     dateStyle: 'long',
     timeStyle: 'short',
@@ -95,14 +101,14 @@ export function buildAdministrativeEmailHtml(c: AdministrativeMailContent): stri
   <div style="background:#e8edf4;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;">
     <div style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,0.08);border:1px solid #e2e8f0;">
       <div style="background:${MAIL_BLUE};color:#ffffff;text-align:center;padding:14px 16px;font-size:15px;font-weight:700;letter-spacing:0.02em;">
-        Messagerie — Commonwealth School
+        Messagerie — ${escapeHtml(schoolName)}
       </div>
       <div style="padding:28px 24px 8px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
           <tr>
             <td width="88" valign="top">${logoBlock}</td>
             <td valign="middle" style="padding-left:16px;">
-              <div style="font-size:24px;font-weight:800;color:${MAIL_BLUE};line-height:1.15;">Commonwealth School</div>
+              <div style="font-size:24px;font-weight:800;color:${MAIL_BLUE};line-height:1.15;">${escapeHtml(schoolName)}</div>
               <div style="font-size:14px;color:#64748b;margin-top:4px;">Service administratif</div>
             </td>
           </tr>
@@ -126,7 +132,7 @@ export function buildAdministrativeEmailHtml(c: AdministrativeMailContent): stri
         </div>
       </div>
       <div style="padding:8px 24px 28px;text-align:center;font-size:12px;color:#64748b;line-height:1.6;">
-        Commonwealth School · Numéro d’urgence élève : ${escapeHtml(emergency)}<br />
+        ${escapeHtml(schoolName)} · Numéro d’urgence élève : ${escapeHtml(emergency)}<br />
         <span style="color:#94a3b8;">Document généré le ${escapeHtml(generated)}</span>
       </div>
     </div>
@@ -147,13 +153,15 @@ export function buildAdministrativeEmailText(parts: {
   footerText: string;
   signatureText: string;
   emergencyPhone?: string;
+  schoolDisplayName?: string;
 }): string {
-  const emergency = parts.emergencyPhone?.trim() || '(219) 555-0114';
+  const emergency = parts.emergencyPhone?.trim() || SCHOOL_CONTACT_DEFAULTS.phone;
+  const schoolName = parts.schoolDisplayName?.trim() || SCHOOL_CONTACT_DEFAULTS.displayName;
   const generated = new Date().toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
   return [
-    'Messagerie — Commonwealth School',
+    'Messagerie — ' + schoolName,
     '',
-    'Commonwealth School — Service administratif',
+    schoolName + ' — Service administratif',
     '',
     `De : ${parts.fromDisplay}`,
     `À : ${parts.toLine}`,
@@ -169,7 +177,7 @@ export function buildAdministrativeEmailText(parts: {
     '',
     parts.signatureText,
     '',
-    `Commonwealth School · Numéro d'urgence élève : ${emergency}`,
+    `${schoolName} · Numéro d'urgence élève : ${emergency}`,
     `Document généré le ${generated}`,
   ].join('\n');
 }

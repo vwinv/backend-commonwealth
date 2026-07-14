@@ -24,6 +24,9 @@ import { AdminProgrammeController } from './admin-programme.controller';
 import { AdminProgrammeService } from './admin-programme.service';
 import { AdminUsersController } from './admin-users.controller';
 import { AdminUsersService } from './admin-users.service';
+import { AdminAteliersController } from './admin-ateliers.controller';
+import { AdminAteliersService } from './admin-ateliers.service';
+import { PublicAteliersController } from './public-ateliers.controller';
 import { AdminStudentsController } from './admin-students.controller';
 import { AdminStudentsService } from './admin-students.service';
 
@@ -38,6 +41,8 @@ import { AdminStudentsService } from './admin-students.service';
     AdminAccountingController,
     AdminDocumentsController,
     AdminProgrammeController,
+    AdminAteliersController,
+    PublicAteliersController,
     AdminSettingsController,
     AdminUsersController,
   ],
@@ -50,6 +55,7 @@ import { AdminStudentsService } from './admin-students.service';
     AdminAccountingService,
     AdminDocumentsService,
     AdminProgrammeService,
+    AdminAteliersService,
     AdminSettingsService,
     AdminUsersService,
   ],

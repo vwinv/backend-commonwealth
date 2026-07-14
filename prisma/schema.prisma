@@ -104,6 +104,12 @@ enum VaccinationStatus {
   MISSING
 }
 
+enum WorkshopReservationStatus {
+  VALIDEE
+  EN_ATTENTE
+  ANNULEE
+}
+
 enum SchoolSignatureType {
   CALLIGRAPHY
   HANDWRITTEN
@@ -661,4 +667,52 @@ model ChildVaccination {
   updatedAt      DateTime           @updatedAt
 
   @@index([healthRecordId])
+}
+
+/// Atelier découverte (landing / admin Gestion des Ateliers).
+model Workshop {
+  id             String   @id @default(uuid())
+  title          String
+  description    String?
+  importantInfo  String?
+  imageUrl       String
+  eventDate      DateTime @db.Date
+  startTime      String
+  endTime        String
+  location       String?
+  ageRange       String?
+  recommendedAge String?
+  capacity       Int
+  isFree         Boolean  @default(true)
+  priceLabel     String?
+  published      Boolean  @default(true)
+
+  reservations WorkshopReservation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([eventDate])
+  @@index([published])
+}
+
+model WorkshopReservation {
+  id          String                    @id @default(uuid())
+  code        String                    @unique
+  workshopId  String
+  workshop    Workshop                  @relation(fields: [workshopId], references: [id], onDelete: Cascade)
+  childName   String
+  childAge    Int?
+  parentName  String
+  parentPhone String?
+  places      Int                       @default(1)
+  status      WorkshopReservationStatus @default(EN_ATTENTE)
+  reservedAt  DateTime                  @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([workshopId])
+  @@index([status])
+  @@index([reservedAt])
 }
