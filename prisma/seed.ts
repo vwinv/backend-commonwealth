@@ -74,6 +74,7 @@ async function main() {
     AppModuleRole.ELEVES,
     AppModuleRole.PARENTS,
     AppModuleRole.PROGRAMME,
+    AppModuleRole.ATELIERS,
     AppModuleRole.UTILISATEURS,
     AppModuleRole.FINANCE,
     AppModuleRole.DOCUMENTS,

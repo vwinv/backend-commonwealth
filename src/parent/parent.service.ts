@@ -10,15 +10,21 @@ import {
   FollowUpNoteCategory,
   FollowUpNoteStatus,
   Gender,
+  DocumentSignatureStatus,
   ParentRelation,
   Prisma,
   SchoolSignatureType,
   SchoolYearStatus,
   UserRole,
   VaccinationStatus,
+  WorkshopAccountKind,
+  WorkshopReservationStatus,
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { BillingService } from '../billing/billing.service';
+import { saveDocumentParentSignatureFromDataUrl } from '../admin/document-signature.util';
+import { publishedDocumentsForParentWhere } from '../documents/document-audience.util';
+import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { saveHealthRecordParentSignatureFromDataUrl } from './parent-health-signature.util';
@@ -83,6 +89,7 @@ export class ParentService {
     private readonly prisma: PrismaService,
     private readonly billing: BillingService,
     private readonly notifications: NotificationsService,
+    private readonly mail: MailService,
   ) {}
 
   private async getOpenSchoolYearLabel() {
@@ -602,42 +609,382 @@ export class ParentService {
     const children = await this.prisma.child.findMany({
       where: { parentId: userId },
       include: {
-        enrollments: { select: { levelId: true } },
+        enrollments: { select: { levelId: true, classId: true } },
       },
     });
     const levelIds = [
       ...new Set(children.flatMap((c) => c.enrollments.map((e) => e.levelId))),
     ];
+    const classIds = [
+      ...new Set(
+        children.flatMap((c) => c.enrollments.map((e) => e.classId).filter((id): id is string => !!id)),
+      ),
+    ];
 
-    const seen = new Set<string>();
-    const out: { id: string; title: string; url: string; kind: 'SCHOOL' | 'ADMIN' }[] = [];
-
-    const globalDocs = await this.prisma.document.findMany({
-      where: { published: true, levels: { none: {} } },
+    const rows = await this.prisma.document.findMany({
+      where: publishedDocumentsForParentWhere(userId, levelIds, classIds),
       orderBy: { createdAt: 'desc' },
-      select: { id: true, title: true, url: true, kind: true },
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        kind: true,
+        requiresParentSignature: true,
+      },
     });
-    for (const d of globalDocs) {
-      seen.add(d.id);
-      out.push({ id: d.id, title: d.title, url: d.url, kind: d.kind });
-    }
 
-    if (levelIds.length > 0) {
-      const rows = await this.prisma.levelDocument.findMany({
-        where: { levelId: { in: levelIds }, document: { published: true } },
-        include: {
-          document: { select: { id: true, title: true, url: true, kind: true } },
-        },
+    const requiredIds = rows.filter((d) => d.requiresParentSignature).map((d) => d.id);
+    if (requiredIds.length > 0) {
+      await this.prisma.documentSignature.createMany({
+        data: requiredIds.map((documentId) => ({
+          documentId,
+          parentId: userId,
+          status: DocumentSignatureStatus.PENDING,
+        })),
+        skipDuplicates: true,
       });
-      for (const row of rows) {
-        if (seen.has(row.documentId)) continue;
-        seen.add(row.documentId);
-        const d = row.document;
-        out.push({ id: d.id, title: d.title, url: d.url, kind: d.kind });
-      }
     }
 
-    return out;
+    const signatures =
+      requiredIds.length > 0
+        ? await this.prisma.documentSignature.findMany({
+            where: { parentId: userId, documentId: { in: requiredIds } },
+            select: {
+              documentId: true,
+              status: true,
+              signatureUrl: true,
+              signedAt: true,
+            },
+          })
+        : [];
+    const sigByDoc = new Map(signatures.map((s) => [s.documentId, s]));
+
+    return rows.map((d) => {
+      const sig = sigByDoc.get(d.id);
+      const signatureStatus = !d.requiresParentSignature
+        ? 'NONE'
+        : sig?.status === DocumentSignatureStatus.SIGNED
+          ? 'SIGNED'
+          : 'PENDING';
+      return {
+        id: d.id,
+        title: d.title,
+        url: d.url,
+        kind: d.kind,
+        requiresParentSignature: d.requiresParentSignature,
+        signatureStatus,
+        signatureUrl: sig?.signatureUrl ?? null,
+        signedAt: sig?.signedAt?.toISOString() ?? null,
+      };
+    });
+  }
+
+  async signDocument(userId: string, documentId: string, body: Record<string, unknown>) {
+    const dataUrl = String(body?.signatureDataUrl ?? '').trim();
+    if (!dataUrl) throw new BadRequestException('Signature requise.');
+
+    const docs = await this.listLevelDocuments(userId);
+    const doc = docs.find((d) => d.id === documentId);
+    if (!doc) throw new NotFoundException('Document introuvable.');
+    if (!doc.requiresParentSignature) {
+      throw new BadRequestException('Ce document ne nécessite pas de signature.');
+    }
+    if (doc.signatureStatus === 'SIGNED') {
+      return {
+        id: doc.id,
+        title: doc.title,
+        url: doc.url,
+        kind: doc.kind,
+        requiresParentSignature: true,
+        signatureStatus: 'SIGNED' as const,
+        signatureUrl: doc.signatureUrl,
+        signedAt: doc.signedAt,
+      };
+    }
+
+    const signatureUrl = saveDocumentParentSignatureFromDataUrl(documentId, userId, dataUrl);
+    const now = new Date();
+    const row = await this.prisma.documentSignature.upsert({
+      where: {
+        documentId_parentId: { documentId, parentId: userId },
+      },
+      create: {
+        documentId,
+        parentId: userId,
+        status: DocumentSignatureStatus.SIGNED,
+        signatureUrl,
+        signedAt: now,
+      },
+      update: {
+        status: DocumentSignatureStatus.SIGNED,
+        signatureUrl,
+        signedAt: now,
+      },
+    });
+
+    return {
+      id: doc.id,
+      title: doc.title,
+      url: doc.url,
+      kind: doc.kind,
+      requiresParentSignature: true,
+      signatureStatus: 'SIGNED' as const,
+      signatureUrl: row.signatureUrl,
+      signedAt: row.signedAt?.toISOString() ?? now.toISOString(),
+    };
+  }
+
+  private mapWorkshopForParent(
+    w: {
+      id: string;
+      title: string;
+      description: string | null;
+      importantInfo: string | null;
+      imageUrl: string;
+      eventDate: Date;
+      startTime: string;
+      endTime: string;
+      location: string | null;
+      ageRange: string | null;
+      recommendedAge: string | null;
+      capacity: number;
+      isFree: boolean;
+      priceLabel: string | null;
+      closed?: boolean;
+    },
+    placesUsed = 0,
+  ) {
+    const closed = Boolean(w.closed);
+    const remaining = closed ? 0 : Math.max(0, w.capacity - placesUsed);
+    return {
+      id: w.id,
+      title: w.title,
+      description: w.description ?? '',
+      importantInfo: w.importantInfo ?? '',
+      image: w.imageUrl,
+      date: w.eventDate.toLocaleDateString('fr-FR', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+      }),
+      dateValue: w.eventDate.toISOString().slice(0, 10),
+      time: `De ${w.startTime.replace(':', 'H')} à ${w.endTime.replace(':', 'H')}`,
+      age: w.ageRange || w.recommendedAge || '—',
+      price: w.isFree ? 'Gratuit' : w.priceLabel || '—',
+      location: w.location ?? '',
+      capacity: w.capacity,
+      closed,
+      placesRemaining: remaining,
+      startTime: w.startTime,
+      endTime: w.endTime,
+    };
+  }
+
+  async listWorkshops() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const workshops = await this.prisma.workshop.findMany({
+      where: {
+        published: true,
+        eventDate: { gte: today },
+      },
+      orderBy: [{ eventDate: 'asc' }, { startTime: 'asc' }],
+    });
+
+    const ids = workshops.map((w) => w.id);
+    const bookedRows = ids.length
+      ? await this.prisma.workshopReservation.groupBy({
+          by: ['workshopId'],
+          where: {
+            workshopId: { in: ids },
+            status: { not: WorkshopReservationStatus.ANNULEE },
+          },
+          _sum: { places: true },
+        })
+      : [];
+    const bookedMap = new Map(bookedRows.map((r) => [r.workshopId, r._sum.places ?? 0]));
+
+    return {
+      items: workshops.map((w) => this.mapWorkshopForParent(w, bookedMap.get(w.id) ?? 0)),
+    };
+  }
+
+  async getWorkshop(workshopId: string) {
+    const workshop = await this.prisma.workshop.findFirst({
+      where: { id: workshopId, published: true },
+    });
+    if (!workshop) throw new NotFoundException('Atelier introuvable.');
+
+    const booked = await this.prisma.workshopReservation.aggregate({
+      where: {
+        workshopId,
+        status: { not: WorkshopReservationStatus.ANNULEE },
+      },
+      _sum: { places: true },
+    });
+
+    return this.mapWorkshopForParent(workshop, booked._sum.places ?? 0);
+  }
+
+  async registerWorkshop(parentId: string, workshopId: string, body: Record<string, unknown>) {
+    const workshop = await this.prisma.workshop.findFirst({
+      where: { id: workshopId, published: true },
+    });
+    if (!workshop) throw new NotFoundException('Atelier introuvable.');
+    if (workshop.closed) {
+      throw new BadRequestException('Cet atelier est clôturé : plus aucune réservation n’est possible.');
+    }
+
+    const rawIds = body?.childIds;
+    const childIds = Array.isArray(rawIds)
+      ? [...new Set(rawIds.map((id) => String(id ?? '').trim()).filter(Boolean))]
+      : String(body?.childId ?? '').trim()
+        ? [String(body.childId).trim()]
+        : [];
+    if (!childIds.length) throw new BadRequestException('Sélectionnez au moins un enfant.');
+
+    const children = await this.prisma.child.findMany({
+      where: { id: { in: childIds }, parentId },
+      select: { id: true, firstName: true, lastName: true, birthDate: true },
+    });
+    if (children.length !== childIds.length) {
+      throw new NotFoundException('Un ou plusieurs enfants sont introuvables.');
+    }
+
+    const parent = await this.prisma.user.findUnique({
+      where: { id: parentId },
+      select: { fullName: true, email: true, phone: true },
+    });
+    if (!parent) throw new NotFoundException('Compte parent introuvable.');
+
+    const booked = await this.prisma.workshopReservation.aggregate({
+      where: {
+        workshopId,
+        status: { not: WorkshopReservationStatus.ANNULEE },
+      },
+      _sum: { places: true },
+    });
+    const used = booked._sum.places ?? 0;
+    const places = Math.max(1, Math.floor(Number(body?.places ?? 1)) || 1);
+    if (used + places > workshop.capacity) {
+      throw new BadRequestException('Il ne reste plus assez de places pour cet atelier.');
+    }
+
+    const today = new Date();
+    const ages = children.map((child) => {
+      if (!child.birthDate) return null;
+      let age = today.getFullYear() - child.birthDate.getFullYear();
+      const m = today.getMonth() - child.birthDate.getMonth();
+      if (m < 0 || (m === 0 && today.getDate() < child.birthDate.getDate())) age -= 1;
+      return Math.max(0, age);
+    });
+    const childAge = ages.length === 1 ? ages[0] : null;
+    const childName = children
+      .map((c) => `${c.firstName} ${c.lastName}`.trim())
+      .filter(Boolean)
+      .join(', ');
+
+    const count = await this.prisma.workshopReservation.count();
+    const code = `RES-${String(count + 1).padStart(5, '0')}`;
+    const parentName = parent.fullName?.trim() || parent.email;
+
+    const reservation = await this.prisma.workshopReservation.create({
+      data: {
+        code,
+        workshopId,
+        userId: parentId,
+        childName,
+        childAge,
+        parentName,
+        parentPhone: parent.phone,
+        places,
+        status: WorkshopReservationStatus.EN_ATTENTE,
+        accountKind: WorkshopAccountKind.PARENT,
+      },
+    });
+
+    const dateLabel = workshop.eventDate.toLocaleDateString('fr-FR', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+    });
+    const timeLabel = `De ${workshop.startTime.replace(':', 'H')} à ${workshop.endTime.replace(':', 'H')}`;
+
+    await this.mail
+      .sendWorkshopReservationConfirmation({
+        to: parent.email,
+        parentName,
+        parentPhone: parent.phone,
+        reservationCode: reservation.code,
+        workshopTitle: workshop.title,
+        workshopDateLabel: dateLabel,
+        workshopTimeLabel: timeLabel,
+        places,
+        childName,
+      })
+      .catch((err) => {
+        this.logger.error(
+          `E-mail réservation atelier non envoyé (${reservation.code})`,
+          err instanceof Error ? err.stack : err,
+        );
+      });
+
+    return {
+      id: reservation.id,
+      code: reservation.code,
+      status: reservation.status,
+      workshopId,
+      childName,
+      places,
+    };
+  }
+
+  async listMyWorkshopReservations(parentId: string) {
+    const parent = await this.prisma.user.findUnique({
+      where: { id: parentId },
+      select: { id: true },
+    });
+    if (!parent) throw new NotFoundException('Compte parent introuvable.');
+
+    // Uniquement les réservations explicitement liées à ce compte (jamais par tél. / nom).
+    const mine = await this.prisma.workshopReservation.findMany({
+      where: { userId: parentId },
+      include: { workshop: true },
+      orderBy: { reservedAt: 'desc' },
+    });
+
+    return {
+      items: mine.map((r) => ({
+        id: r.id,
+        code: r.code,
+        status: r.status,
+        places: r.places,
+        childName: r.childName,
+        reservedAt: r.reservedAt.toISOString(),
+        reservedAtLabel: r.reservedAt.toLocaleString('fr-FR', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        workshop: {
+          id: r.workshop.id,
+          title: r.workshop.title,
+          description: r.workshop.description ?? '',
+          image: r.workshop.imageUrl,
+          date: r.workshop.eventDate.toLocaleDateString('fr-FR', {
+            day: '2-digit',
+            month: 'long',
+            year: 'numeric',
+          }),
+          dateValue: r.workshop.eventDate.toISOString().slice(0, 10),
+          time: `De ${r.workshop.startTime.replace(':', 'H')} à ${r.workshop.endTime.replace(':', 'H')}`,
+          age: r.workshop.ageRange || r.workshop.recommendedAge || '—',
+          price: r.workshop.isFree ? 'Gratuit' : r.workshop.priceLabel || '—',
+        },
+      })),
+    };
   }
 
   private async assertChildOwned(parentId: string, childId: string) {
@@ -653,6 +1000,7 @@ export class ParentService {
     id: string;
     category: FollowUpNoteCategory;
     content: string;
+    rating: number | null;
     noteDate: Date;
     createdAt: Date;
     publishedAt: Date | null;
@@ -661,6 +1009,7 @@ export class ParentService {
       id: note.id,
       category: note.category,
       content: note.content,
+      rating: note.rating,
       noteDate: note.noteDate.toISOString().slice(0, 10),
       timeLabel: note.createdAt.toLocaleTimeString('fr-FR', {
         hour: '2-digit',

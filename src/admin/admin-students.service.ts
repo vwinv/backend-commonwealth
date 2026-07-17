@@ -383,6 +383,7 @@ export class AdminStudentsService {
     id: string;
     category: FollowUpNoteCategory;
     content: string;
+    rating: number | null;
     status: FollowUpNoteStatus;
     noteDate: Date;
     createdAt: Date;
@@ -392,6 +393,7 @@ export class AdminStudentsService {
       id: note.id,
       category: note.category,
       content: note.content,
+      rating: note.rating,
       status: note.status,
       noteDate: note.noteDate.toISOString().slice(0, 10),
       timeLabel: note.createdAt.toLocaleTimeString('fr-FR', {
@@ -410,6 +412,14 @@ export class AdminStudentsService {
       throw new BadRequestException('Catégorie de note invalide.');
     }
     return v as FollowUpNoteCategory;
+  }
+
+  private parseFollowUpRating(raw: unknown): number {
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isInteger(n) || n < 1 || n > 5) {
+      throw new BadRequestException('La note doit être entre 1 et 5 étoiles.');
+    }
+    return n;
   }
 
   private parseNoteDate(raw: unknown): Date {
@@ -449,19 +459,19 @@ export class AdminStudentsService {
   async createFollowUpNote(childId: string, authorId: string, body: Record<string, unknown>) {
     await this.assertEligibleChild(childId);
     const category = this.parseFollowUpCategory(body.category);
+    const rating = this.parseFollowUpRating(body.rating);
     const content = String(body.content ?? '').trim();
-    if (!content) {
-      throw new BadRequestException('Le contenu de la note est obligatoire.');
-    }
     const noteDate = this.parseNoteDate(body.noteDate);
     const note = await this.prisma.childFollowUpNote.create({
       data: {
         childId,
         category,
+        rating,
         content,
         noteDate,
         authorId,
-        status: FollowUpNoteStatus.DRAFT,
+        status: FollowUpNoteStatus.PUBLISHED,
+        publishedAt: new Date(),
       },
     });
     return this.mapFollowUpNote(note);
@@ -481,12 +491,11 @@ export class AdminStudentsService {
     if (body.category !== undefined) {
       data.category = this.parseFollowUpCategory(body.category);
     }
+    if (body.rating !== undefined) {
+      data.rating = this.parseFollowUpRating(body.rating);
+    }
     if (body.content !== undefined) {
-      const content = String(body.content).trim();
-      if (!content) {
-        throw new BadRequestException('Le contenu de la note est obligatoire.');
-      }
-      data.content = content;
+      data.content = String(body.content).trim();
     }
     if (body.status !== undefined) {
       const status = String(body.status).trim().toUpperCase();

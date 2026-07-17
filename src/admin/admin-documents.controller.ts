@@ -49,6 +49,16 @@ export class AdminDocumentsController {
     });
   }
 
+  @Get('parent-options')
+  parentOptions(@Query('search') search?: string) {
+    return this.documents.searchParentOptions(search || undefined);
+  }
+
+  @Get('audience-options')
+  audienceOptions() {
+    return this.documents.getAudienceOptions();
+  }
+
   @Post('upload')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -84,6 +94,22 @@ export class AdminDocumentsController {
   @Post()
   create(@Body() body: Record<string, unknown>) {
     return this.documents.create(body);
+  }
+
+  @Get(':id/signatures')
+  signatures(
+    @Param('id') id: string,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.documents.getSignatures(id, {
+      status: status || undefined,
+      search: search || undefined,
+      page: page !== undefined && page !== '' ? parseInt(page, 10) : undefined,
+      limit: limit !== undefined && limit !== '' ? parseInt(limit, 10) : undefined,
+    });
   }
 
   @Patch(':id')

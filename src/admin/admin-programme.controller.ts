@@ -29,6 +29,27 @@ export class AdminProgrammeController {
     return this.programme.getOverview({ schoolYear, category });
   }
 
+  @Get('categories')
+  listCategories() {
+    return this.programme.listCategories(true);
+  }
+
+  @Post('categories')
+  createCategory(@Body() body: Record<string, unknown>) {
+    return this.programme.createCategory(body);
+  }
+
+  @Patch('categories/:id')
+  updateCategory(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.programme.updateCategory(id, body);
+  }
+
+  @Delete('categories/:id')
+  @HttpCode(HttpStatus.OK)
+  removeCategory(@Param('id') id: string) {
+    return this.programme.removeCategory(id);
+  }
+
   @Post()
   create(@Body() body: Record<string, unknown>) {
     return this.programme.create(body);

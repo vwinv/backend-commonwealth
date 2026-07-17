@@ -140,6 +140,22 @@ export type EnrollmentApprovedMailParams = {
   childLine: string;
 };
 
+export type WorkshopReservationMailParams = {
+  to: string;
+  parentName: string | null;
+  parentPhone?: string | null;
+  reservationCode: string;
+  workshopTitle: string;
+  workshopDateLabel: string;
+  workshopTimeLabel: string;
+  places: number;
+  childName?: string | null;
+};
+
+export type WorkshopReservationDecisionMailParams = WorkshopReservationMailParams & {
+  decision: 'VALIDEE' | 'ANNULEE';
+};
+
 export type HealthSignatureRequestMailParams = {
   to: string;
   parentName: string | null;
@@ -675,6 +691,258 @@ export class MailService {
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail de pré-inscription envoyé à ${params.to}`);
+      await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
+    } catch (err) {
+      this.logger.error(`Échec envoi e-mail à ${params.to}`, err instanceof Error ? err.stack : err);
+    }
+  }
+
+  /** Confirmation de réservation d’atelier (espace parent ou landing). */
+  async sendWorkshopReservationConfirmation(params: WorkshopReservationMailParams): Promise<void> {
+    const from =
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
+
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const subjectBold = `Confirmation de réservation — ${params.workshopTitle}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || 'Participant';
+    const greeting = params.parentName?.trim()
+      ? `Bonjour ${escapeHtml(params.parentName.trim())},`
+      : 'Bonjour,';
+
+    const placesLabel = `${params.places} place${params.places > 1 ? 's' : ''}`;
+    const childLine = params.childName?.trim() || '';
+
+    const introHtml = `
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0 0 12px;">Nous avons bien enregistré votre <strong>réservation de place(s)</strong> pour l’atelier <strong>${escapeHtml(params.workshopTitle)}</strong>.</p>
+      <p style="margin:0;">Votre demande est <strong>en attente de validation</strong> par l’administration. Vous serez informé(e) dès qu’elle aura été examinée.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'N° de réservation', value: escapeHtml(params.reservationCode), valueTone: 'blue' },
+      { label: 'Atelier', value: escapeHtml(params.workshopTitle) },
+      { label: 'Date', value: escapeHtml(params.workshopDateLabel) },
+      { label: 'Horaire', value: escapeHtml(params.workshopTimeLabel) },
+      { label: 'Places réservées', value: escapeHtml(placesLabel) },
+      ...(childLine
+        ? [{ label: 'Enfant(s)', value: escapeHtml(childLine) }]
+        : []),
+      { label: 'Statut', value: 'En attente de validation', valueTone: 'blue' },
+    ];
+
+    const footerBodyHtml = `
+      <p style="margin:0;">Conservez ce message comme preuve de votre demande. Pour toute question, répondez à cet e-mail ou contactez le service administratif aux coordonnées ci-dessous.</p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: params.parentPhone?.trim() || null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName, params.parentPhone?.trim()].filter(Boolean).join(' · '),
+      introText: [
+        params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+        '',
+        `Nous avons bien enregistré votre réservation pour l’atelier ${params.workshopTitle}.`,
+        'Votre demande est en attente de validation par l’administration.',
+      ].join('\n'),
+      recapLines: [
+        `N° de réservation: ${params.reservationCode}`,
+        `Atelier: ${params.workshopTitle}`,
+        `Date: ${params.workshopDateLabel}`,
+        `Horaire: ${params.workshopTimeLabel}`,
+        `Places: ${placesLabel}`,
+        ...(childLine ? [`Enfant(s): ${childLine}`] : []),
+        'Statut: En attente de validation',
+      ],
+      footerText:
+        'Conservez ce message comme preuve de votre demande. Pour toute question, contactez le service administratif.',
+      signatureText: [
+        'Service administratif',
+        this.schoolDisplayName(),
+        this.adminDisplayEmail(),
+        this.adminPhone(),
+      ].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
+    });
+
+    if (!transport) {
+      this.logger.warn(`E-mail non envoyé (SMTP non configuré). Destinataire : ${params.to}`);
+      return;
+    }
+
+    try {
+      await transport.sendMail({
+        from,
+        to: params.to,
+        subject,
+        text,
+        html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(`E-mail de réservation atelier envoyé à ${params.to}`);
+      await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
+    } catch (err) {
+      this.logger.error(`Échec envoi e-mail à ${params.to}`, err instanceof Error ? err.stack : err);
+    }
+  }
+
+  /** Décision admin : réservation d’atelier validée ou annulée. */
+  async sendWorkshopReservationDecision(params: WorkshopReservationDecisionMailParams): Promise<void> {
+    const from =
+      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
+
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const isValidated = params.decision === 'VALIDEE';
+    const statusLabel = isValidated ? 'Validée' : 'Annulée';
+    const subjectBold = isValidated
+      ? `Réservation validée — ${params.workshopTitle}`
+      : `Réservation annulée — ${params.workshopTitle}`;
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || 'Participant';
+    const greeting = params.parentName?.trim()
+      ? `Bonjour ${escapeHtml(params.parentName.trim())},`
+      : 'Bonjour,';
+
+    const placesLabel = `${params.places} place${params.places > 1 ? 's' : ''}`;
+    const childLine = params.childName?.trim() || '';
+
+    const introHtml = isValidated
+      ? `
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0 0 12px;">Bonne nouvelle : votre réservation pour l’atelier <strong>${escapeHtml(params.workshopTitle)}</strong> a été <strong>validée</strong> par l’administration.</p>
+      <p style="margin:0;">Nous vous attendons à la date et à l’horaire indiqués ci-dessous. Conservez ce message comme confirmation.</p>`
+      : `
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0 0 12px;">Nous vous informons que votre réservation pour l’atelier <strong>${escapeHtml(params.workshopTitle)}</strong> a été <strong>annulée</strong>.</p>
+      <p style="margin:0;">Si vous pensez qu’il s’agit d’une erreur ou souhaitez une autre session, contactez le service administratif.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'N° de réservation', value: escapeHtml(params.reservationCode), valueTone: 'blue' },
+      { label: 'Atelier', value: escapeHtml(params.workshopTitle) },
+      { label: 'Date', value: escapeHtml(params.workshopDateLabel) },
+      { label: 'Horaire', value: escapeHtml(params.workshopTimeLabel) },
+      { label: 'Places réservées', value: escapeHtml(placesLabel) },
+      ...(childLine
+        ? [{ label: 'Enfant(s)', value: escapeHtml(childLine) }]
+        : []),
+      {
+        label: 'Statut',
+        value: statusLabel,
+        valueTone: isValidated ? 'blue' : 'red',
+      },
+    ];
+
+    const footerBodyHtml = isValidated
+      ? `<p style="margin:0;">Pour toute question, répondez à cet e-mail ou contactez le service administratif aux coordonnées ci-dessous.</p>`
+      : `<p style="margin:0;">Pour toute question concernant cette annulation, répondez à cet e-mail ou contactez le service administratif aux coordonnées ci-dessous.</p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: params.parentPhone?.trim() || null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName, params.parentPhone?.trim()].filter(Boolean).join(' · '),
+      introText: isValidated
+        ? [
+            params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+            '',
+            `Bonne nouvelle : votre réservation pour l’atelier ${params.workshopTitle} a été validée.`,
+            'Nous vous attendons à la date et à l’horaire indiqués.',
+          ].join('\n')
+        : [
+            params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+            '',
+            `Nous vous informons que votre réservation pour l’atelier ${params.workshopTitle} a été annulée.`,
+            'Contactez le service administratif en cas de question.',
+          ].join('\n'),
+      recapLines: [
+        `N° de réservation: ${params.reservationCode}`,
+        `Atelier: ${params.workshopTitle}`,
+        `Date: ${params.workshopDateLabel}`,
+        `Horaire: ${params.workshopTimeLabel}`,
+        `Places: ${placesLabel}`,
+        ...(childLine ? [`Enfant(s): ${childLine}`] : []),
+        `Statut: ${statusLabel}`,
+      ],
+      footerText: isValidated
+        ? 'Pour toute question, contactez le service administratif.'
+        : 'Pour toute question concernant cette annulation, contactez le service administratif.',
+      signatureText: [
+        'Service administratif',
+        this.schoolDisplayName(),
+        this.adminDisplayEmail(),
+        this.adminPhone(),
+      ].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
+    });
+
+    if (!transport) {
+      this.logger.warn(`E-mail non envoyé (SMTP non configuré). Destinataire : ${params.to}`);
+      return;
+    }
+
+    try {
+      await transport.sendMail({
+        from,
+        to: params.to,
+        subject,
+        text,
+        html,
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(
+        `E-mail atelier (${isValidated ? 'validation' : 'annulation'}) envoyé à ${params.to}`,
+      );
       await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
     } catch (err) {
       this.logger.error(`Échec envoi e-mail à ${params.to}`, err instanceof Error ? err.stack : err);

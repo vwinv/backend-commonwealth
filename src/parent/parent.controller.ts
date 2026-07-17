@@ -205,6 +205,39 @@ export class ParentController {
     return this.parent.listLevelDocuments(jwt.sub);
   }
 
+  @Get('ateliers')
+  ateliers() {
+    return this.parent.listWorkshops();
+  }
+
+  @Get('ateliers/reservations')
+  atelierReservations(@ParentUser() jwt: ParentJwtPayload) {
+    return this.parent.listMyWorkshopReservations(jwt.sub);
+  }
+
+  @Get('ateliers/:workshopId')
+  atelierDetail(@Param('workshopId') workshopId: string) {
+    return this.parent.getWorkshop(workshopId);
+  }
+
+  @Post('ateliers/:workshopId/register')
+  registerAtelier(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('workshopId') workshopId: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.parent.registerWorkshop(jwt.sub, workshopId, body);
+  }
+
+  @Post('documents/:documentId/sign')
+  signDocument(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('documentId') documentId: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.parent.signDocument(jwt.sub, documentId, body);
+  }
+
   @Get('children/:childId')
   getChild(
     @ParentUser() jwt: ParentJwtPayload,

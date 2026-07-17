@@ -30,7 +30,7 @@ import { AdminAteliersService } from './admin-ateliers.service';
 
 @Controller('admin/ateliers')
 @UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
-@RequireAppModule(AppModuleRole.PROGRAMME)
+@RequireAppModule(AppModuleRole.ATELIERS)
 export class AdminAteliersController {
   constructor(private readonly ateliers: AdminAteliersService) {}
 
@@ -80,9 +80,24 @@ export class AdminAteliersController {
     return this.ateliers.create(body);
   }
 
+  @Get(':id')
+  getOne(@Param('id') id: string) {
+    return this.ateliers.getById(id);
+  }
+
+  @Post(':id/duplicate')
+  duplicate(@Param('id') id: string) {
+    return this.ateliers.duplicate(id);
+  }
+
   @Patch(':id/publish')
   setPublished(@Param('id') id: string, @Body() body: Record<string, unknown>) {
     return this.ateliers.setPublished(id, body);
+  }
+
+  @Patch(':id/close')
+  setClosed(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.ateliers.setClosed(id, body);
   }
 
   @Patch(':id')

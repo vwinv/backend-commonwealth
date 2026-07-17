@@ -11,8 +11,14 @@ async function bootstrap() {
   mkdirSync(join(uploadRoot, 'ateliers'), { recursive: true });
   mkdirSync(join(uploadRoot, 'health-signatures'), { recursive: true });
   mkdirSync(join(uploadRoot, 'enrollment-signatures'), { recursive: true });
+  mkdirSync(join(uploadRoot, 'document-signatures'), { recursive: true });
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
+  // Signatures (data URL base64) > limite Express par défaut (100kb).
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '5mb' }));
   app.use('/uploads', express.static(uploadRoot));
   app.enableShutdownHooks();
   app.enableCors({

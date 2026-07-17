@@ -15,6 +15,8 @@ enum UserRole {
   PARENT
   ADMIN
   STAFF
+  /// Compte créé depuis une réservation atelier landing (pas d’accès espace parent).
+  VISITEUR
 }
 
 enum EnrollmentStatus {
@@ -73,13 +75,6 @@ enum CashSessionStatus {
   CLOSED
 }
 
-enum ProgramCategory {
-  SORTIE_SCOLAIRE
-  PARENTS
-  PROFESSEURS
-  SKILLS_EVEIL
-}
-
 enum ProgramEventStatus {
   PLANNED
   IN_PROGRESS
@@ -110,6 +105,12 @@ enum WorkshopReservationStatus {
   ANNULEE
 }
 
+/// Origine du compte ayant réservé (espace parent vs landing).
+enum WorkshopAccountKind {
+  PARENT
+  VISITEUR
+}
+
 enum SchoolSignatureType {
   CALLIGRAPHY
   HANDWRITTEN
@@ -122,6 +123,7 @@ enum AppModuleRole {
   ELEVES
   PARENTS
   PROGRAMME
+  ATELIERS
   UTILISATEURS
   FINANCE
   DOCUMENTS
@@ -154,6 +156,9 @@ model User {
   cashSessionsOpened CashSession[] @relation("CashSessionOpenedBy")
   appModuleRoles     UserAppModuleRole[]
   childFollowUpNotes ChildFollowUpNote[]
+  documentSignatures DocumentSignature[]
+  targetedDocuments  DocumentParent[]
+  workshopReservations WorkshopReservation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -234,12 +239,18 @@ model ClassRoom {
   headTeacher String?
 
   enrollments Enrollment[]
+  documents   ClassDocument[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([levelId])
   @@unique([levelId, name])
+}
+
+enum DocumentSignatureStatus {
+  PENDING
+  SIGNED
 }
 
 model Document {
@@ -249,11 +260,34 @@ model Document {
   kind      DocumentKind @default(SCHOOL)
   /// Si false, le document n'apparaît pas dans l'espace parent.
   published Boolean  @default(false)
+  /// Si true, chaque parent concerné doit signer le document.
+  requiresParentSignature Boolean @default(false)
 
-  levels    LevelDocument[]
+  levels           LevelDocument[]
+  classes          ClassDocument[]
+  targetedParents  DocumentParent[]
+  signatures       DocumentSignature[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model DocumentSignature {
+  id           String                  @id @default(uuid())
+  documentId   String
+  document     Document                @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  parentId     String
+  parent       User                    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  status       DocumentSignatureStatus @default(PENDING)
+  signatureUrl String?
+  signedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([documentId, parentId])
+  @@index([parentId])
+  @@index([documentId, status])
 }
 
 model LevelDocument {
@@ -267,6 +301,33 @@ model LevelDocument {
 
   @@id([levelId, documentId])
   @@index([documentId])
+}
+
+model ClassDocument {
+  classId    String
+  documentId String
+
+  class      ClassRoom @relation(fields: [classId], references: [id], onDelete: Cascade)
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime @default(now())
+
+  @@id([classId, documentId])
+  @@index([documentId])
+}
+
+/// Parents ciblés nommément (tous niveaux confondus).
+model DocumentParent {
+  documentId String
+  parentId   String
+
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  parent     User     @relation(fields: [parentId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime @default(now())
+
+  @@id([documentId, parentId])
+  @@index([parentId])
 }
 
 model Enrollment {
@@ -576,6 +637,25 @@ model CashManualEntry {
   @@index([entryAt])
 }
 
+/// Catégorie personnalisable du programme (Sport, Culture, Skills & éveil…).
+model ProgrammeCategory {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  slug      String   @unique
+  color     String   @default("#216EC2")
+  bgColor   String   @default("#E8F1FB")
+  sortOrder Int      @default(0)
+  active    Boolean  @default(true)
+
+  events ProgramEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([sortOrder])
+  @@index([active])
+}
+
 /// Événement du programme scolaire (sorties, réunions, ateliers…).
 model ProgramEvent {
   id            String             @id @default(uuid())
@@ -585,7 +665,8 @@ model ProgramEvent {
   endDate       DateTime?
   location      String?
   assignedStaff String?
-  category      ProgramCategory
+  categoryId    String
+  category      ProgrammeCategory  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   status        ProgramEventStatus @default(PLANNED)
   schoolYear    String
 
@@ -596,7 +677,7 @@ model ProgramEvent {
 
   @@index([schoolYear])
   @@index([eventDate])
-  @@index([category])
+  @@index([categoryId])
   @@index([status])
 }
 
@@ -617,7 +698,10 @@ model ChildFollowUpNote {
   childId     String
   child       Child                @relation(fields: [childId], references: [id], onDelete: Cascade)
   category    FollowUpNoteCategory
-  content     String
+  /// Note sur 5 (étoiles). Obligatoire pour les nouvelles entrées.
+  rating      Int?
+  /// Commentaire optionnel.
+  content     String               @default("")
   status      FollowUpNoteStatus   @default(DRAFT)
   /// Jour concerné (date calendaire).
   noteDate    DateTime             @db.Date
@@ -686,6 +770,8 @@ model Workshop {
   isFree         Boolean  @default(true)
   priceLabel     String?
   published      Boolean  @default(true)
+  /// Si true : atelier toujours visible, mais plus de nouvelles réservations.
+  closed         Boolean  @default(false)
 
   reservations WorkshopReservation[]
 
@@ -701,18 +787,25 @@ model WorkshopReservation {
   code        String                    @unique
   workshopId  String
   workshop    Workshop                  @relation(fields: [workshopId], references: [id], onDelete: Cascade)
+  /// Compte parent ou visiteur ayant réservé (null pour anciennes lignes / saisie admin).
+  userId      String?
+  user        User?                     @relation(fields: [userId], references: [id], onDelete: SetNull)
   childName   String
   childAge    Int?
   parentName  String
   parentPhone String?
   places      Int                       @default(1)
   status      WorkshopReservationStatus @default(EN_ATTENTE)
+  /// Parent (espace connecté / e-mail parent) ou Visiteur (landing).
+  accountKind WorkshopAccountKind       @default(PARENT)
   reservedAt  DateTime                  @default(now())
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([workshopId])
+  @@index([userId])
   @@index([status])
   @@index([reservedAt])
+  @@index([accountKind])
 }

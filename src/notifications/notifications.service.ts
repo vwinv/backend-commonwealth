@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { EnrollmentStatus, PaymentStatus, UserRole } from '@prisma/client';
+import { documentAudienceParentWhere } from '../documents/document-audience.util';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -62,34 +63,31 @@ export class NotificationsService {
   async notifyDocumentPublished(documentId: string) {
     const doc = await this.prisma.document.findUnique({
       where: { id: documentId },
-      include: { levels: { select: { levelId: true } } },
+      include: {
+        levels: { select: { levelId: true } },
+        classes: { select: { classId: true } },
+        targetedParents: { select: { parentId: true } },
+      },
     });
     if (!doc?.published) return;
 
-    const levelIds = doc.levels.map((l) => l.levelId);
     const parents = await this.prisma.user.findMany({
-      where: {
-        role: UserRole.PARENT,
-        blocked: false,
-        children: {
-          some: {
-            enrollments: {
-              some: {
-                status: EnrollmentStatus.APPROVED,
-                ...(levelIds.length > 0 ? { levelId: { in: levelIds } } : {}),
-              },
-            },
-          },
-        },
-      },
+      where: documentAudienceParentWhere({
+        levelIds: doc.levels.map((l) => l.levelId),
+        classIds: doc.classes.map((c) => c.classId),
+        parentIds: doc.targetedParents.map((p) => p.parentId),
+      }),
       select: { id: true },
     });
 
     const kindLabel = doc.kind === 'ADMIN' ? 'administratif' : 'scolaire';
+    const signHint = doc.requiresParentSignature
+      ? ' Une signature de votre part est demandée.'
+      : '';
     for (const p of parents) {
       await this.createIfNewChannel(p.id, `doc:${documentId}`, {
         title: 'Nouveau document',
-        body: `Un document ${kindLabel} a été publié : « ${doc.title} ».`,
+        body: `Un document ${kindLabel} a été publié : « ${doc.title} ».${signHint}`,
         kind: 'DOCUMENT',
       });
     }
