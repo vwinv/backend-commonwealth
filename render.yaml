@@ -1,0 +1,9 @@
+# Blueprint Render — Build Command doit compiler avant le Start (instance 512 MiB).
+services:
+  - type: web
+    name: backend-commonwealth
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm run start
+    healthCheckPath: /
