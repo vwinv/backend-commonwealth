@@ -124,6 +124,7 @@ enum AppModuleRole {
   PARENTS
   PROGRAMME
   ATELIERS
+  LANDING
   UTILISATEURS
   FINANCE
   DOCUMENTS
@@ -808,4 +809,13 @@ model WorkshopReservation {
   @@index([status])
   @@index([reservedAt])
   @@index([accountKind])
+}
+
+/// Contenu éditable de la landing (singleton `home`).
+model LandingPage {
+  id        String   @id @default("home")
+  /// { fr: home.*, en: home.*, images: { about?, approach?, suggestions?, hero?: string[], gallery?: string[], partners?: string[] } }
+  content   Json
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
 }

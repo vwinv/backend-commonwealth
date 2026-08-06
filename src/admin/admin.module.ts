@@ -27,6 +27,9 @@ import { AdminUsersService } from './admin-users.service';
 import { AdminAteliersController } from './admin-ateliers.controller';
 import { AdminAteliersService } from './admin-ateliers.service';
 import { PublicAteliersController } from './public-ateliers.controller';
+import { AdminLandingController } from './admin-landing.controller';
+import { AdminLandingService } from './admin-landing.service';
+import { PublicLandingController } from './public-landing.controller';
 import { AdminStudentsController } from './admin-students.controller';
 import { AdminStudentsService } from './admin-students.service';
 
@@ -43,6 +46,8 @@ import { AdminStudentsService } from './admin-students.service';
     AdminProgrammeController,
     AdminAteliersController,
     PublicAteliersController,
+    AdminLandingController,
+    PublicLandingController,
     AdminSettingsController,
     AdminUsersController,
   ],
@@ -56,6 +61,7 @@ import { AdminStudentsService } from './admin-students.service';
     AdminDocumentsService,
     AdminProgrammeService,
     AdminAteliersService,
+    AdminLandingService,
     AdminSettingsService,
     AdminUsersService,
   ],

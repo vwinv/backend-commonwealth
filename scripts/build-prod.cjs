@@ -10,6 +10,10 @@ const dist = join(process.cwd(), 'dist');
 if (existsSync(dist)) {
   rmSync(dist, { recursive: true, force: true });
 }
+for (const info of ['tsconfig.tsbuildinfo', 'tsconfig.build.tsbuildinfo', 'tsconfig.build.prod.tsbuildinfo']) {
+  const p = join(process.cwd(), info);
+  if (existsSync(p)) rmSync(p, { force: true });
+}
 
 const tsc = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
 const build = spawnSync(
