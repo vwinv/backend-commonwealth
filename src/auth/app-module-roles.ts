@@ -28,11 +28,22 @@ export const APP_MODULE_ROLE_LABELS: Record<AppModuleRole, string> = {
 
 export const DIRECTOR_JOB_TITLE = 'Directeur';
 
+export const ADMIN_PORTAL_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.STAFF];
+
 export function isSuperAdmin(systemRole: UserRole): boolean {
   return systemRole === UserRole.ADMIN;
 }
 
-/** Tableau de bord Home : super admin ou poste Directeur uniquement. */
+export function isAdminPortalRole(systemRole: UserRole | string | null | undefined): boolean {
+  return (
+    systemRole === UserRole.ADMIN ||
+    systemRole === UserRole.STAFF ||
+    systemRole === 'ADMIN' ||
+    systemRole === 'STAFF'
+  );
+}
+
+/** Tableau de bord Home : super admin ou poste Directeur. */
 export function canAccessHome(systemRole: UserRole, jobTitle: string | null | undefined): boolean {
   if (isSuperAdmin(systemRole)) return true;
   return String(jobTitle ?? '').trim() === DIRECTOR_JOB_TITLE;

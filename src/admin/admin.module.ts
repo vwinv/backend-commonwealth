@@ -32,6 +32,8 @@ import { AdminLandingService } from './admin-landing.service';
 import { PublicLandingController } from './public-landing.controller';
 import { AdminStudentsController } from './admin-students.controller';
 import { AdminStudentsService } from './admin-students.service';
+import { AdminDataController } from './admin-data.controller';
+import { AdminDataService } from './admin-data.service';
 
 @Module({
   imports: [PrismaModule, AuthModule, MailModule, EnrollmentsModule, BillingModule, NotificationsModule, PaymentsModule],
@@ -50,6 +52,7 @@ import { AdminStudentsService } from './admin-students.service';
     PublicLandingController,
     AdminSettingsController,
     AdminUsersController,
+    AdminDataController,
   ],
   providers: [
     AdminDashboardService,
@@ -64,6 +67,7 @@ import { AdminStudentsService } from './admin-students.service';
     AdminLandingService,
     AdminSettingsService,
     AdminUsersService,
+    AdminDataService,
   ],
 })
 export class AdminModule {}

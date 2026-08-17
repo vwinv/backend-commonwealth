@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
+import { isAdminPortalRole } from './app-module-roles';
 import type { AdminJwtPayload } from './parent-jwt.guard';
 
 export type { AdminJwtPayload, ParentJwtPayload } from './parent-jwt.guard';
@@ -23,7 +24,7 @@ export class AdminJwtGuard implements CanActivate {
     try {
       const payload = this.jwtService.verify<AdminJwtPayload>(token);
       const role = payload.role;
-      if (role !== 'ADMIN' && role !== 'STAFF') {
+      if (!isAdminPortalRole(role)) {
         throw new UnauthorizedException();
       }
       request.adminUser = payload;

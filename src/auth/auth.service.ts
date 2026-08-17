@@ -8,7 +8,7 @@ import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminPermissionsService } from './admin-permissions.service';
-import { isSuperAdmin, roleOptionsForApi } from './app-module-roles';
+import { isAdminPortalRole, isSuperAdmin, roleOptionsForApi } from './app-module-roles';
 import type { AdminJwtPayload, ParentJwtPayload } from './parent-jwt.guard';
 
 const BCRYPT_ROUNDS = 10;
@@ -67,11 +67,7 @@ export class AuthService {
     }
 
     const user = await this.prisma.user.findUnique({ where: { email } });
-    if (
-      !user ||
-      (user.role !== UserRole.ADMIN && user.role !== UserRole.STAFF) ||
-      !user.passwordHash
-    ) {
+    if (!user || !isAdminPortalRole(user.role) || !user.passwordHash) {
       throw new UnauthorizedException('Identifiants incorrects');
     }
 

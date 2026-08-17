@@ -10,6 +10,10 @@ export default defineConfig({
     seed: "ts-node --transpile-only prisma/seed.ts",
   },
   datasource: {
-    url: process.env["DATABASE_URL"],
+    url: (() => {
+      const url = process.env["DATABASE_URL"] ?? "";
+      if (!url || /localhost|127\.0\.0\.1/.test(url) || /sslmode=/i.test(url)) return url;
+      return url.includes("?") ? `${url}&sslmode=require` : `${url}?sslmode=require`;
+    })(),
   },
 });

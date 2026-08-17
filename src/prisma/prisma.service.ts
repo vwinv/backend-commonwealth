@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
+import { createPrismaPgAdapter } from './prisma-pg.adapter';
 
 @Injectable()
 export class PrismaService
@@ -15,7 +15,7 @@ export class PrismaService
       );
     }
 
-    super({ adapter: new PrismaPg(databaseUrl) });
+    super({ adapter: createPrismaPgAdapter(databaseUrl) });
   }
 
   async onModuleInit() {
