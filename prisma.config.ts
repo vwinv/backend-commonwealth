@@ -11,9 +11,14 @@ export default defineConfig({
   },
   datasource: {
     url: (() => {
-      const url = process.env["DATABASE_URL"] ?? "";
-      if (!url || /localhost|127\.0\.0\.1/.test(url) || /sslmode=/i.test(url)) return url;
-      return url.includes("?") ? `${url}&sslmode=require` : `${url}?sslmode=require`;
+      const raw = process.env["DATABASE_URL"] ?? "";
+      if (!raw || /localhost|127\.0\.0\.1/.test(raw)) return raw;
+      const [base, query] = raw.split("?");
+      const params = (query ?? "")
+        .split("&")
+        .filter((part) => part && !/^sslmode=/i.test(part) && !/^ssl=/i.test(part));
+      params.push("sslmode=no-verify");
+      return `${base}?${params.join("&")}`;
     })(),
   },
 });

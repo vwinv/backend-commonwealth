@@ -1,23 +1,32 @@
 import { PrismaPg } from '@prisma/adapter-pg';
-import type { PoolConfig } from 'pg';
+import { Pool } from 'pg';
 
 function isLocalPostgres(databaseUrl: string): boolean {
   return /localhost|127\.0\.0\.1/.test(databaseUrl);
 }
 
-function withRequiredSsl(databaseUrl: string): string {
-  if (isLocalPostgres(databaseUrl) || /sslmode=/i.test(databaseUrl)) {
-    return databaseUrl;
-  }
-  return databaseUrl.includes('?') ? `${databaseUrl}&sslmode=require` : `${databaseUrl}?sslmode=require`;
+/** Enlève sslmode/ssl de l’URL pour éviter le conflit avec l’option `ssl` du pool. */
+export function stripSslParams(databaseUrl: string): string {
+  const [base, query] = databaseUrl.split('?');
+  if (!query) return databaseUrl;
+  const params = query
+    .split('&')
+    .filter((part) => part && !/^sslmode=/i.test(part) && !/^ssl=/i.test(part));
+  return params.length ? `${base}?${params.join('&')}` : base;
 }
 
-/** Render (et la plupart des Postgres hébergés) exigent SSL, y compris pour les transactions. */
+/** Render exige SSL mais utilise un certificat non reconnu par Node. */
+export function withNoVerifySsl(databaseUrl: string): string {
+  if (isLocalPostgres(databaseUrl)) return databaseUrl;
+  const cleaned = stripSslParams(databaseUrl);
+  return cleaned.includes('?') ? `${cleaned}&sslmode=no-verify` : `${cleaned}?sslmode=no-verify`;
+}
+
 export function createPrismaPgAdapter(databaseUrl: string): PrismaPg {
-  const connectionString = withRequiredSsl(databaseUrl);
-  const config: PoolConfig = { connectionString };
-  if (!isLocalPostgres(connectionString)) {
-    config.ssl = { rejectUnauthorized: false };
-  }
-  return new PrismaPg(config);
+  const local = isLocalPostgres(databaseUrl);
+  const pool = new Pool({
+    connectionString: stripSslParams(databaseUrl),
+    ssl: local ? undefined : { rejectUnauthorized: false },
+  });
+  return new PrismaPg(pool, { disposeExternalPool: true });
 }
