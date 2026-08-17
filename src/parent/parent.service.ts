@@ -210,15 +210,19 @@ export class ParentService {
     if (!url) throw new BadRequestException('URL de photo invalide.');
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, profilePhotoUrl: true },
     });
     if (!user || user.role !== UserRole.PARENT) throw new NotFoundException();
     try {
-      return await this.prisma.user.update({
+      const updated = await this.prisma.user.update({
         where: { id: userId },
         data: { profilePhotoUrl: url },
         select: { id: true, profilePhotoUrl: true },
       });
+      if (user.profilePhotoUrl && user.profilePhotoUrl !== url) {
+        await this.cloudinary.destroyUrl(user.profilePhotoUrl);
+      }
+      return updated;
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2022') {
         throw new BadRequestException(

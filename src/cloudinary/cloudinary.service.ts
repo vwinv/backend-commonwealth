@@ -125,6 +125,72 @@ export class CloudinaryService {
     return { url, publicId: result.public_id };
   }
 
+  /** Supprime un fichier Cloudinary à partir de son URL. Ignore les URLs hors Cloudinary. */
+  async destroyUrl(url: string | null | undefined) {
+    const parsed = this.parseCloudinaryUrl(url);
+    if (!parsed || !this.ready) return;
+    try {
+      await cloudinary.uploader.destroy(parsed.publicId, {
+        resource_type: parsed.resourceType,
+        invalidate: true,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Impossible de supprimer ${parsed.publicId} sur Cloudinary.`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  async destroyUrls(urls: Array<string | null | undefined>) {
+    const unique = [...new Set(urls.map((u) => String(u ?? '').trim()).filter(Boolean))];
+    await Promise.all(unique.map((url) => this.destroyUrl(url)));
+  }
+
+  collectUrls(value: unknown, out: string[] = []): string[] {
+    if (typeof value === 'string') {
+      if (this.parseCloudinaryUrl(value)) out.push(value.trim());
+      return out;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) this.collectUrls(item, out);
+      return out;
+    }
+    if (value && typeof value === 'object') {
+      for (const item of Object.values(value as Record<string, unknown>)) this.collectUrls(item, out);
+    }
+    return out;
+  }
+
+  urlsRemoved(previous: unknown, next: unknown): string[] {
+    const before = new Set(this.collectUrls(previous));
+    const after = new Set(this.collectUrls(next));
+    return [...before].filter((url) => !after.has(url));
+  }
+
+  private parseCloudinaryUrl(url: string | null | undefined): {
+    publicId: string;
+    resourceType: 'image' | 'raw' | 'video';
+  } | null {
+    const raw = String(url ?? '').trim();
+    if (!raw) return null;
+    const match =
+      /^https?:\/\/res\.cloudinary\.com\/([^/]+)\/(image|raw|video|auto)\/upload\/(?:.*\/)?v\d+\/(.+)$/i.exec(
+        raw,
+      );
+    if (!match?.[1] || !match[2] || !match[3]) return null;
+    const cloudName = this.config.get<string>('CLOUDINARY_CLOUD_NAME')?.trim() ?? '';
+    if (cloudName && match[1] !== cloudName) return null;
+
+    const resourceType = match[2].toLowerCase() === 'raw' ? 'raw' : match[2].toLowerCase() === 'video' ? 'video' : 'image';
+    let publicId = match[3].split('?')[0] ?? '';
+    publicId = decodeURIComponent(publicId);
+    if (resourceType !== 'raw') {
+      publicId = publicId.replace(/\.[a-z0-9]+$/i, '');
+    }
+    return publicId ? { publicId, resourceType } : null;
+  }
+
   private guessResourceType(file: Express.Multer.File): 'image' | 'raw' | 'auto' {
     const mime = String(file.mimetype ?? '').toLowerCase();
     if (mime.startsWith('image/')) return 'image';

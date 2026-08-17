@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { Prisma, UserRole, WorkshopAccountKind, WorkshopReservationStatus } from '@prisma/client';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 function parseRequiredString(raw: unknown, label: string): string {
   const s = String(raw ?? '').trim();
@@ -102,6 +103,7 @@ export class AdminAteliersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mail: MailService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   private async nextReservationCode(): Promise<string> {
@@ -682,7 +684,7 @@ export class AdminAteliersService {
         ? existing.published
         : parseBool(body.published, existing.published);
 
-    return this.prisma.workshop.update({
+    const updated = await this.prisma.workshop.update({
       where: { id },
       data: {
         title,
@@ -701,6 +703,10 @@ export class AdminAteliersService {
         published,
       },
     });
+    if (existing.imageUrl && existing.imageUrl !== imageUrl) {
+      await this.cloudinary.destroyUrl(existing.imageUrl);
+    }
+    return updated;
   }
 
   async setPublished(id: string, body: Record<string, unknown>) {
@@ -829,7 +835,8 @@ export class AdminAteliersService {
 
   async remove(id: string) {
     try {
-      await this.prisma.workshop.delete({ where: { id } });
+      const existing = await this.prisma.workshop.delete({ where: { id } });
+      await this.cloudinary.destroyUrl(existing.imageUrl);
       return { ok: true };
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {

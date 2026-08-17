@@ -13,6 +13,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 function formatSchoolYearLabel(schoolYear: string): string {
   const s = schoolYear.trim();
@@ -74,6 +75,7 @@ export class AdminStudentsService {
     private readonly prisma: PrismaService,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   private paidApprovedBase(): Prisma.EnrollmentWhereInput {
@@ -259,7 +261,19 @@ export class AdminStudentsService {
     if (!ok) {
       throw new NotFoundException('Élève introuvable ou non éligible');
     }
+    const child = await this.prisma.child.findUnique({
+      where: { id: childId },
+      select: {
+        photoUrl: true,
+        healthRecord: { select: { schoolSignatureUrl: true, parentSignatureUrl: true } },
+      },
+    });
     await this.prisma.child.delete({ where: { id: childId } });
+    await this.cloudinary.destroyUrls([
+      child?.photoUrl,
+      child?.healthRecord?.schoolSignatureUrl,
+      child?.healthRecord?.parentSignatureUrl,
+    ]);
   }
 
   async listSchoolYears() {
@@ -372,11 +386,18 @@ export class AdminStudentsService {
     const url = String(photoUrl ?? '').trim();
     if (!url) throw new BadRequestException('URL de photo invalide.');
     await this.assertEligibleChild(childId);
+    const previous = await this.prisma.child.findUnique({
+      where: { id: childId },
+      select: { photoUrl: true },
+    });
     const child = await this.prisma.child.update({
       where: { id: childId },
       data: { photoUrl: url },
       select: { id: true, photoUrl: true },
     });
+    if (previous?.photoUrl && previous.photoUrl !== url) {
+      await this.cloudinary.destroyUrl(previous.photoUrl);
+    }
     return { photoUrl: child.photoUrl };
   }
 
@@ -730,6 +751,7 @@ export class AdminStudentsService {
       if (!url) {
         throw new BadRequestException('Image de signature requise.');
       }
+      const previousUrl = record.schoolSignatureUrl;
       await this.prisma.childHealthRecord.update({
         where: { id: record.id },
         data: {
@@ -743,11 +765,15 @@ export class AdminStudentsService {
           schoolSignedById: adminUserId,
         },
       });
+      if (previousUrl && previousUrl !== url) {
+        await this.cloudinary.destroyUrl(previousUrl);
+      }
     } else if (typeRaw === SchoolSignatureType.CALLIGRAPHY) {
       const text = String(body.text ?? '').trim();
       if (!text) {
         throw new BadRequestException('Saisissez le texte de la signature.');
       }
+      const previousUrl = record.schoolSignatureUrl;
       await this.prisma.childHealthRecord.update({
         where: { id: record.id },
         data: {
@@ -758,6 +784,9 @@ export class AdminStudentsService {
           schoolSignedById: adminUserId,
         },
       });
+      if (previousUrl) {
+        await this.cloudinary.destroyUrl(previousUrl);
+      }
     } else {
       throw new BadRequestException('Type de signature invalide.');
     }

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { LANDING_DEFAULT_CONTENT } from './landing-defaults';
 
 export type LandingContent = {
@@ -20,7 +21,10 @@ function asContent(raw: unknown): LandingContent {
 
 @Injectable()
 export class AdminLandingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
 
   async getContent(): Promise<{ id: string; content: LandingContent; updatedAt: string }> {
     let row = await this.prisma.landingPage.findUnique({ where: { id: 'home' } });
@@ -47,6 +51,7 @@ export class AdminLandingService {
       images: incoming.images ?? {},
     };
 
+    const previous = await this.prisma.landingPage.findUnique({ where: { id: 'home' } });
     const row = await this.prisma.landingPage.upsert({
       where: { id: 'home' },
       create: {
@@ -57,6 +62,9 @@ export class AdminLandingService {
         content: content as unknown as Prisma.InputJsonValue,
       },
     });
+    await this.cloudinary.destroyUrls(
+      this.cloudinary.urlsRemoved(asContent(previous?.content).images, content.images),
+    );
 
     return {
       id: row.id,
@@ -66,6 +74,7 @@ export class AdminLandingService {
   }
 
   async resetToDefaults() {
+    const previous = await this.prisma.landingPage.findUnique({ where: { id: 'home' } });
     const row = await this.prisma.landingPage.upsert({
       where: { id: 'home' },
       create: {
@@ -76,6 +85,9 @@ export class AdminLandingService {
         content: LANDING_DEFAULT_CONTENT as unknown as Prisma.InputJsonValue,
       },
     });
+    await this.cloudinary.destroyUrls(
+      this.cloudinary.urlsRemoved(asContent(previous?.content).images, LANDING_DEFAULT_CONTENT.images),
+    );
     return {
       id: row.id,
       content: asContent(row.content),

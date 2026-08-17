@@ -13,6 +13,7 @@ import {
 } from '../documents/document-audience.util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 function kindLabelFr(k: DocumentKind): string {
   return k === DocumentKind.ADMIN ? 'Administratif' : 'Scolaire';
@@ -36,6 +37,7 @@ export class AdminDocumentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   async getOverview(query: { page?: number; limit?: number; search?: string; sort?: string }) {
@@ -457,7 +459,18 @@ export class AdminDocumentsService {
 
   async remove(id: string) {
     try {
+      const existing = await this.prisma.document.findUnique({
+        where: { id },
+        select: {
+          url: true,
+          signatures: { select: { signatureUrl: true } },
+        },
+      });
       await this.prisma.document.delete({ where: { id } });
+      await this.cloudinary.destroyUrls([
+        existing?.url,
+        ...(existing?.signatures.map((s) => s.signatureUrl) ?? []),
+      ]);
       return { ok: true };
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
