@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -10,29 +9,29 @@ import {
   Patch,
   Post,
   Query,
-  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { randomBytes } from 'crypto';
-import type { Request } from 'express';
-import { mkdirSync } from 'fs';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
 import { AppModuleRole } from '@prisma/client';
 import { AdminJwtGuard } from '../auth/admin-jwt.guard';
 import { AdminPermissionGuard } from '../auth/admin-permission.guard';
 import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
 import { RequireAppModule } from '../auth/require-app-module.decorator';
+import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { DOCUMENT_FILENAME, memoryUploadOptions } from '../cloudinary/memory-upload';
 import { AdminDocumentsService } from './admin-documents.service';
 
 @Controller('admin/documents')
 @UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
 @RequireAppModule(AppModuleRole.DOCUMENTS)
 export class AdminDocumentsController {
-  constructor(private readonly documents: AdminDocumentsService) {}
+  constructor(
+    private readonly documents: AdminDocumentsService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
 
   @Get()
   overview(
@@ -61,34 +60,17 @@ export class AdminDocumentsController {
 
   @Post('upload')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: (_req, _file, cb) => {
-          const dir = join(process.cwd(), 'uploads', 'documents');
-          mkdirSync(dir, { recursive: true });
-          cb(null, dir);
-        },
-        filename: (_req, file, cb) => {
-          const ext = extname(file.originalname) || '.bin';
-          cb(null, `${Date.now()}-${randomBytes(8).toString('hex')}${ext.toLowerCase()}`);
-        },
-      }),
-      limits: { fileSize: 20 * 1024 * 1024 },
-      fileFilter: (_req, file, cb) => {
-        const ok = /\.(pdf|doc|docx)$/i.test(file.originalname);
-        cb(null, ok);
-      },
-    }),
+    FileInterceptor(
+      'file',
+      memoryUploadOptions({ maxBytes: 20 * 1024 * 1024, filenamePattern: DOCUMENT_FILENAME }),
+    ),
   )
-  upload(@UploadedFile() file: Express.Multer.File, @Req() req: Request) {
-    if (!file) {
-      throw new BadRequestException('Fichier requis (PDF, DOC ou DOCX).');
-    }
-    const publicPath = `/uploads/documents/${file.filename}`;
-    const proto = req.get('x-forwarded-proto') ?? req.protocol;
-    const host = req.get('host');
-    const url = host ? `${proto}://${host}${publicPath}` : publicPath;
-    return { url, path: publicPath, filename: file.originalname };
+  async upload(@UploadedFile() file: Express.Multer.File) {
+    const uploaded = await this.cloudinary.uploadMulterFile(file, CLOUDINARY_FOLDERS.documents, {
+      resourceType: 'raw',
+      missingMessage: 'Fichier requis (PDF, DOC ou DOCX).',
+    });
+    return { url: uploaded.url, path: uploaded.url, filename: file.originalname };
   }
 
   @Post()

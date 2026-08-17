@@ -186,6 +186,8 @@ model Child {
   lastName    String
   birthDate   DateTime?
   gender      Gender   @default(UNSPECIFIED)
+  /// Photo de l’élève (Cloudinary, dossier eleve).
+  photoUrl    String?
   /// Allergies alimentaires ou autres (texte libre).
   allergies   String?
 

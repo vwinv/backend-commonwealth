@@ -160,6 +160,7 @@ export class AdminStudentsService {
         childId: e.childId,
         enrollmentId: e.id,
         studentName: `${e.child.firstName} ${e.child.lastName}`.trim(),
+        photoUrl: e.child.photoUrl,
         age: ageLabelDetailed(e.child.birthDate),
         className: e.class?.name ?? e.level.name,
         schoolYear: formatSchoolYearLabel(e.schoolYear),
@@ -209,6 +210,7 @@ export class AdminStudentsService {
       firstName: c.firstName,
       lastName: c.lastName,
       fullName: `${c.firstName} ${c.lastName}`.trim(),
+      photoUrl: c.photoUrl,
       matricule: matriculeFromChildId(c.id),
       ageLabel: ageLabelDetailed(c.birthDate),
       birthDisplay: c.birthDate
@@ -364,6 +366,18 @@ export class AdminStudentsService {
     });
 
     return this.getProfile(childId);
+  }
+
+  async updatePhoto(childId: string, photoUrl: string) {
+    const url = String(photoUrl ?? '').trim();
+    if (!url) throw new BadRequestException('URL de photo invalide.');
+    await this.assertEligibleChild(childId);
+    const child = await this.prisma.child.update({
+      where: { id: childId },
+      data: { photoUrl: url },
+      select: { id: true, photoUrl: true },
+    });
+    return { photoUrl: child.photoUrl };
   }
 
   private async assertEligibleChild(childId: string) {

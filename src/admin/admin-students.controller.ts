@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -17,10 +16,6 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { randomBytes } from 'crypto';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
-import { mkdirSync } from 'fs';
 import type { Request } from 'express';
 import { AppModuleRole } from '@prisma/client';
 import { AdminJwtGuard } from '../auth/admin-jwt.guard';
@@ -28,6 +23,9 @@ import type { AdminJwtPayload } from '../auth/admin-jwt.guard';
 import { AdminPermissionGuard } from '../auth/admin-permission.guard';
 import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
 import { RequireAppModule } from '../auth/require-app-module.decorator';
+import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { IMAGE_FILENAME, memoryUploadOptions } from '../cloudinary/memory-upload';
 import { AdminStudentsService } from './admin-students.service';
 
 type AdminRequest = Request & { adminUser?: AdminJwtPayload };
@@ -36,7 +34,10 @@ type AdminRequest = Request & { adminUser?: AdminJwtPayload };
 @UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
 @RequireAppModule(AppModuleRole.ELEVES)
 export class AdminStudentsController {
-  constructor(private readonly students: AdminStudentsService) {}
+  constructor(
+    private readonly students: AdminStudentsService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
 
   @Get()
   overview(
@@ -96,6 +97,20 @@ export class AdminStudentsController {
     return this.students.deleteFollowUpNote(id, noteId);
   }
 
+  @Post(':id/photo')
+  @UseInterceptors(
+    FileInterceptor(
+      'file',
+      memoryUploadOptions({ maxBytes: 5 * 1024 * 1024, filenamePattern: IMAGE_FILENAME }),
+    ),
+  )
+  async uploadPhoto(@Param('id') id: string, @UploadedFile() file: Express.Multer.File) {
+    const uploaded = await this.cloudinary.uploadMulterFile(file, CLOUDINARY_FOLDERS.eleve, {
+      missingMessage: 'Image requise (PNG, JPG, JPEG, WEBP).',
+    });
+    return this.students.updatePhoto(id, uploaded.url);
+  }
+
   @Get(':id/health-record')
   healthRecord(@Param('id') id: string) {
     return this.students.getHealthRecord(id);
@@ -108,24 +123,10 @@ export class AdminStudentsController {
 
   @Post(':id/health-record/school-signature')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: (_req, _file, cb) => {
-          const dir = join(process.cwd(), 'uploads', 'health-signatures');
-          mkdirSync(dir, { recursive: true });
-          cb(null, dir);
-        },
-        filename: (_req, file, cb) => {
-          const ext = extname(file.originalname) || '.png';
-          cb(null, `${Date.now()}-${randomBytes(8).toString('hex')}${ext.toLowerCase()}`);
-        },
-      }),
-      limits: { fileSize: 5 * 1024 * 1024 },
-      fileFilter: (_req, file, cb) => {
-        const ok = /\.(png|jpe?g|webp)$/i.test(file.originalname);
-        cb(null, ok);
-      },
-    }),
+    FileInterceptor(
+      'file',
+      memoryUploadOptions({ maxBytes: 5 * 1024 * 1024, filenamePattern: IMAGE_FILENAME }),
+    ),
   )
   async signSchoolHealthRecord(
     @Param('id') id: string,
@@ -139,13 +140,10 @@ export class AdminStudentsController {
     const type = String(body.type ?? '').trim().toUpperCase();
     let signatureImageUrl: string | undefined;
     if (type === 'IMAGE' || type === 'HANDWRITTEN') {
-      if (!file) {
-        throw new BadRequestException('Image requise (PNG, JPG, JPEG, WEBP).');
-      }
-      const publicPath = `/uploads/health-signatures/${file.filename}`;
-      const proto = req.get('x-forwarded-proto') ?? req.protocol;
-      const host = req.get('host');
-      signatureImageUrl = host ? `${proto}://${host}${publicPath}` : publicPath;
+      const uploaded = await this.cloudinary.uploadMulterFile(file, CLOUDINARY_FOLDERS.signaturesSante, {
+        missingMessage: 'Image requise (PNG, JPG, JPEG, WEBP).',
+      });
+      signatureImageUrl = uploaded.url;
     }
 
     return this.students.signSchoolHealthRecord(id, adminUserId, body, signatureImageUrl);

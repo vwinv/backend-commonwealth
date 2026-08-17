@@ -1,12 +1,10 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Get,
   Param,
   Patch,
   Post,
-  Req,
   StreamableFile,
   UploadedFile,
   UseGuards,
@@ -19,11 +17,9 @@ import { PaymentsService } from '../payments/payments.service';
 import { ParentInvoicePdfService } from './parent-invoice-pdf.service';
 import { ParentService } from './parent.service';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { randomBytes } from 'crypto';
-import type { Request } from 'express';
-import { mkdirSync } from 'fs';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
+import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { IMAGE_FILENAME, memoryUploadOptions } from '../cloudinary/memory-upload';
 
 @Controller('parent')
 @UseGuards(ParentJwtGuard)
@@ -32,6 +28,7 @@ export class ParentController {
     private readonly parent: ParentService,
     private readonly paymentsService: PaymentsService,
     private readonly parentInvoicePdf: ParentInvoicePdfService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   @Get('me')
@@ -49,38 +46,19 @@ export class ParentController {
 
   @Post('me/photo')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: (_req, _file, cb) => {
-          const dir = join(process.cwd(), 'uploads', 'profiles');
-          mkdirSync(dir, { recursive: true });
-          cb(null, dir);
-        },
-        filename: (_req, file, cb) => {
-          const ext = extname(file.originalname) || '.bin';
-          cb(null, `${Date.now()}-${randomBytes(8).toString('hex')}${ext.toLowerCase()}`);
-        },
-      }),
-      limits: { fileSize: 5 * 1024 * 1024 },
-      fileFilter: (_req, file, cb) => {
-        const ok = /\.(png|jpe?g|webp)$/i.test(file.originalname);
-        cb(null, ok);
-      },
-    }),
+    FileInterceptor(
+      'file',
+      memoryUploadOptions({ maxBytes: 5 * 1024 * 1024, filenamePattern: IMAGE_FILENAME }),
+    ),
   )
   async uploadMyPhoto(
     @ParentUser() jwt: ParentJwtPayload,
     @UploadedFile() file: Express.Multer.File,
-    @Req() req: Request,
   ) {
-    if (!file) {
-      throw new BadRequestException('Image requise (PNG, JPG, JPEG, WEBP).');
-    }
-    const publicPath = `/uploads/profiles/${file.filename}`;
-    const proto = req.get('x-forwarded-proto') ?? req.protocol;
-    const host = req.get('host');
-    const url = host ? `${proto}://${host}${publicPath}` : publicPath;
-    return this.parent.updateMePhoto(jwt.sub, url);
+    const uploaded = await this.cloudinary.uploadMulterFile(file, CLOUDINARY_FOLDERS.profils, {
+      missingMessage: 'Image requise (PNG, JPG, JPEG, WEBP).',
+    });
+    return this.parent.updateMePhoto(jwt.sub, uploaded.url);
   }
 
   @Patch('me/password')

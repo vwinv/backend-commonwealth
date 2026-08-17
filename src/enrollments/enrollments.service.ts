@@ -18,7 +18,8 @@ import {
   assertLevelEnrollmentOpen,
   resolveClassIdForApproval,
 } from './class-capacity.util';
-import { saveEnrollmentParentSignatureFromDataUrl } from './enrollment-signature.util';
+import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -80,6 +81,7 @@ export class EnrollmentsService {
     private readonly billing: BillingService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   private async requireOpenSchoolYear(label: string) {
@@ -977,6 +979,11 @@ export class EnrollmentsService {
       throw new BadRequestException('engagement.signatureDataUrl is required');
     }
 
+    const { url: parentSignatureUrl } = await this.cloudinary.uploadDataUrl(
+      engagementSignatureDataUrl,
+      CLOUDINARY_FOLDERS.signaturesInscriptions,
+    );
+
     const skipParentCredentials = await this.shouldSkipParentCredentialsEmail(
       parentEmail,
       input?.existingParentAccount === true,
@@ -1052,10 +1059,7 @@ export class EnrollmentsService {
               signedPlace: engagementSignedPlace,
               signedAt: engagementSignedAt,
               signatureMode: engagementSignatureMode,
-              parentSignatureUrl: saveEnrollmentParentSignatureFromDataUrl(
-                existing.id,
-                engagementSignatureDataUrl,
-              ),
+              parentSignatureUrl,
             },
           });
 
@@ -1124,6 +1128,21 @@ export class EnrollmentsService {
           },
         });
 
+        const wizardData = buildWizardData({
+          child: item,
+          parent: input?.parent,
+          guardian2: item?.guardian2,
+          emergency: item?.emergency,
+          options: input?.options,
+          engagement: {
+            certified: true,
+            signedPlace: engagementSignedPlace,
+            signedAt: engagementSignedAt,
+            signatureMode: engagementSignatureMode,
+            parentSignatureUrl,
+          },
+        });
+
         const enrollment = await tx.enrollment.create({
           data: {
             childId: child.id,
@@ -1132,6 +1151,8 @@ export class EnrollmentsService {
             schoolYear,
             status: EnrollmentStatus.PENDING,
             validationNote,
+            wizardStep: 5,
+            wizardData: wizardData as Prisma.InputJsonValue,
             pendingParentEmail: parentEmail,
             pendingParentFirstName: parentFirstName || null,
             pendingParentLastName: parentLastName || null,

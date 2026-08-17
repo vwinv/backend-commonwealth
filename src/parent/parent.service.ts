@@ -22,12 +22,12 @@ import {
 } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { BillingService } from '../billing/billing.service';
-import { saveDocumentParentSignatureFromDataUrl } from '../admin/document-signature.util';
+import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { publishedDocumentsForParentWhere } from '../documents/document-audience.util';
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { saveHealthRecordParentSignatureFromDataUrl } from './parent-health-signature.util';
 
 function matriculeFromChildId(childId: string): string {
   const compact = childId.replace(/-/g, '').toUpperCase();
@@ -76,6 +76,7 @@ type ChildRow = {
   lastName: string;
   birthDate: Date | null;
   gender: Gender;
+  photoUrl: string | null;
   allergies: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -90,6 +91,7 @@ export class ParentService {
     private readonly billing: BillingService,
     private readonly notifications: NotificationsService,
     private readonly mail: MailService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   private async getOpenSchoolYearLabel() {
@@ -112,6 +114,7 @@ export class ParentService {
       lastName: row.lastName,
       birthDate: row.birthDate ? row.birthDate.toISOString() : null,
       gender: row.gender,
+      photoUrl: row.photoUrl,
       allergies: row.allergies,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -702,7 +705,10 @@ export class ParentService {
       };
     }
 
-    const signatureUrl = saveDocumentParentSignatureFromDataUrl(documentId, userId, dataUrl);
+    const { url: signatureUrl } = await this.cloudinary.uploadDataUrl(
+      dataUrl,
+      CLOUDINARY_FOLDERS.signaturesDocuments,
+    );
     const now = new Date();
     const row = await this.prisma.documentSignature.upsert({
       where: {
@@ -1148,6 +1154,7 @@ export class ParentService {
         firstName: child.firstName,
         lastName: child.lastName,
         fullName: `${child.firstName} ${child.lastName}`.trim(),
+        photoUrl: child.photoUrl,
         birthDate: child.birthDate?.toISOString() ?? null,
         birthDisplay: child.birthDate
           ? child.birthDate.toLocaleDateString('fr-FR', {
@@ -1216,7 +1223,10 @@ export class ParentService {
       throw new BadRequestException('Signature requise.');
     }
 
-    const parentSignatureUrl = saveHealthRecordParentSignatureFromDataUrl(childId, signatureDataUrl);
+    const { url: parentSignatureUrl } = await this.cloudinary.uploadDataUrl(
+      signatureDataUrl,
+      CLOUDINARY_FOLDERS.signaturesSante,
+    );
 
     const updated = await this.prisma.childHealthRecord.update({
       where: { id: record.id },
