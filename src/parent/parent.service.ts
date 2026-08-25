@@ -12,6 +12,7 @@ import {
   Gender,
   DocumentSignatureStatus,
   ParentRelation,
+  PaymentStatus,
   Prisma,
   SchoolSignatureType,
   SchoolYearStatus,
@@ -28,6 +29,11 @@ import { publishedDocumentsForParentWhere } from '../documents/document-audience
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  formatDateRangeLongFr,
+  isoDateKey,
+  workshopEnd,
+} from '../workshops/workshop-date.util';
 
 function matriculeFromChildId(childId: string): string {
   const compact = childId.replace(/-/g, '').toUpperCase();
@@ -131,6 +137,7 @@ export class ParentService {
           profilePhotoUrl: string | null;
           phone: string | null;
           role: UserRole;
+          mustChangePassword: boolean;
         }
       | null = null;
     try {
@@ -145,6 +152,7 @@ export class ParentService {
           address: true,
           parentRelation: true,
           role: true,
+          mustChangePassword: true,
         },
       });
     } catch (e) {
@@ -159,6 +167,7 @@ export class ParentService {
             address: true,
             parentRelation: true,
             role: true,
+            mustChangePassword: true,
           },
         });
         user = legacy ? { ...legacy, profilePhotoUrl: null } : null;
@@ -236,8 +245,8 @@ export class ParentService {
   async changePassword(userId: string, body: Record<string, unknown>) {
     const currentPassword = String(body?.currentPassword ?? '');
     const newPassword = String(body?.newPassword ?? '');
-    if (!currentPassword || !newPassword) {
-      throw new BadRequestException('Mot de passe actuel et nouveau mot de passe requis.');
+    if (!newPassword) {
+      throw new BadRequestException('Nouveau mot de passe requis.');
     }
     if (newPassword.length < 8) {
       throw new BadRequestException('Le nouveau mot de passe doit contenir au moins 8 caractères.');
@@ -245,19 +254,24 @@ export class ParentService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, role: true, passwordHash: true },
+      select: { id: true, role: true, passwordHash: true, mustChangePassword: true },
     });
     if (!user || user.role !== UserRole.PARENT || !user.passwordHash) {
       throw new NotFoundException();
     }
 
-    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
-    if (!ok) throw new BadRequestException('Mot de passe actuel incorrect.');
+    if (!user.mustChangePassword) {
+      if (!currentPassword) {
+        throw new BadRequestException('Mot de passe actuel et nouveau mot de passe requis.');
+      }
+      const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+      if (!ok) throw new BadRequestException('Mot de passe actuel incorrect.');
+    }
 
     const nextHash = await bcrypt.hash(newPassword, 10);
     await this.prisma.user.update({
       where: { id: userId },
-      data: { passwordHash: nextHash },
+      data: { passwordHash: nextHash, mustChangePassword: false },
     });
     return { ok: true };
   }
@@ -515,17 +529,20 @@ export class ParentService {
         phone: true,
         address: true,
         parentRelation: true,
+        monthlyPaymentPlanEnabled: true,
       },
     });
 
     if (enrollmentIds.length === 0) {
       return {
         billingContact,
+        monthlyPaymentPlanEnabled: Boolean(billingContact?.monthlyPaymentPlanEnabled),
         payments: [],
         legacyPayments: [],
         tuitionCharges: [],
         monthlyInstallments: [],
         totalPaidCents: 0,
+        emptyReason: 'NO_ENROLLMENT' as const,
       };
     }
 
@@ -573,6 +590,7 @@ export class ParentService {
               child: { select: { firstName: true, lastName: true, allergies: true } },
             },
           },
+          lines: { orderBy: { sortOrder: 'asc' } },
         },
       }),
       this.prisma.monthlyInstallment.findMany({
@@ -605,11 +623,50 @@ export class ParentService {
 
     return {
       billingContact,
+      monthlyPaymentPlanEnabled: Boolean(billingContact?.monthlyPaymentPlanEnabled),
       legacyPayments,
       tuitionCharges,
       monthlyInstallments,
       totalPaidCents: legacyPaidCents + tuitionPaidCents + monthlyPaidCents,
+      emptyReason: this.parentPaymentsEmptyReason({
+        approvedCount: approvedEnrollments.length,
+        enrollmentCount: enrollmentIds.length,
+        tuitionCharges,
+        monthlyInstallments,
+        legacyPayments,
+      }),
     };
+  }
+
+  private parentPaymentsEmptyReason(input: {
+    approvedCount: number;
+    enrollmentCount: number;
+    tuitionCharges: Array<{ status: string; amountCents: number }>;
+    monthlyInstallments: Array<{ status: string; totalAmountCents: number }>;
+    legacyPayments: Array<{ status: string; amountCents: number }>;
+  }): 'NO_ENROLLMENT' | 'NOT_APPROVED' | 'NO_TARIFF' | 'ALL_PAID' | null {
+    if (input.enrollmentCount === 0) return 'NO_ENROLLMENT';
+    if (input.approvedCount === 0) return 'NOT_APPROVED';
+
+    const payableTuition = input.tuitionCharges.some(
+      (t) => t.status === PaymentStatus.PENDING && t.amountCents > 0,
+    );
+    const payableMonthly = input.monthlyInstallments.some(
+      (m) => m.status === PaymentStatus.PENDING && m.totalAmountCents > 0,
+    );
+    const payableLegacy = input.legacyPayments.some(
+      (p) => p.status === PaymentStatus.PENDING && p.amountCents > 0,
+    );
+    if (payableTuition || payableMonthly || payableLegacy) return null;
+
+    const anyInvoice =
+      input.tuitionCharges.length + input.monthlyInstallments.length + input.legacyPayments.length > 0;
+    const anyPaid =
+      input.tuitionCharges.some((t) => t.status === PaymentStatus.PAID) ||
+      input.monthlyInstallments.some((m) => m.status === PaymentStatus.PAID) ||
+      input.legacyPayments.some((p) => p.status === PaymentStatus.PAID);
+    if (anyInvoice && anyPaid) return 'ALL_PAID';
+    return 'NO_TARIFF';
   }
 
   async listLevelDocuments(userId: string) {
@@ -752,6 +809,7 @@ export class ParentService {
       importantInfo: string | null;
       imageUrl: string;
       eventDate: Date;
+      endDate: Date;
       startTime: string;
       endTime: string;
       location: string | null;
@@ -766,18 +824,16 @@ export class ParentService {
   ) {
     const closed = Boolean(w.closed);
     const remaining = closed ? 0 : Math.max(0, w.capacity - placesUsed);
+    const end = workshopEnd(w);
     return {
       id: w.id,
       title: w.title,
       description: w.description ?? '',
       importantInfo: w.importantInfo ?? '',
       image: w.imageUrl,
-      date: w.eventDate.toLocaleDateString('fr-FR', {
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric',
-      }),
-      dateValue: w.eventDate.toISOString().slice(0, 10),
+      date: formatDateRangeLongFr(w.eventDate, end),
+      dateValue: isoDateKey(w.eventDate),
+      endDateValue: isoDateKey(end),
       time: `De ${w.startTime.replace(':', 'H')} à ${w.endTime.replace(':', 'H')}`,
       age: w.ageRange || w.recommendedAge || '—',
       price: w.isFree ? 'Gratuit' : w.priceLabel || '—',
@@ -796,7 +852,7 @@ export class ParentService {
     const workshops = await this.prisma.workshop.findMany({
       where: {
         published: true,
-        eventDate: { gte: today },
+        endDate: { gte: today },
       },
       orderBy: [{ eventDate: 'asc' }, { startTime: 'asc' }],
     });
@@ -843,6 +899,11 @@ export class ParentService {
     if (!workshop) throw new NotFoundException('Atelier introuvable.');
     if (workshop.closed) {
       throw new BadRequestException('Cet atelier est clôturé : plus aucune réservation n’est possible.');
+    }
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    if (isoDateKey(workshopEnd(workshop)) < isoDateKey(todayStart)) {
+      throw new BadRequestException('Cet atelier est terminé : plus aucune réservation n’est possible.');
     }
 
     const rawIds = body?.childIds;
@@ -913,11 +974,7 @@ export class ParentService {
       },
     });
 
-    const dateLabel = workshop.eventDate.toLocaleDateString('fr-FR', {
-      day: '2-digit',
-      month: 'long',
-      year: 'numeric',
-    });
+    const dateLabel = formatDateRangeLongFr(workshop.eventDate, workshopEnd(workshop));
     const timeLabel = `De ${workshop.startTime.replace(':', 'H')} à ${workshop.endTime.replace(':', 'H')}`;
 
     await this.mail
@@ -983,12 +1040,9 @@ export class ParentService {
           title: r.workshop.title,
           description: r.workshop.description ?? '',
           image: r.workshop.imageUrl,
-          date: r.workshop.eventDate.toLocaleDateString('fr-FR', {
-            day: '2-digit',
-            month: 'long',
-            year: 'numeric',
-          }),
-          dateValue: r.workshop.eventDate.toISOString().slice(0, 10),
+          date: formatDateRangeLongFr(r.workshop.eventDate, workshopEnd(r.workshop)),
+          dateValue: isoDateKey(r.workshop.eventDate),
+          endDateValue: isoDateKey(workshopEnd(r.workshop)),
           time: `De ${r.workshop.startTime.replace(':', 'H')} à ${r.workshop.endTime.replace(':', 'H')}`,
           age: r.workshop.ageRange || r.workshop.recommendedAge || '—',
           price: r.workshop.isFree ? 'Gratuit' : r.workshop.priceLabel || '—',

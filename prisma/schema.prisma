@@ -58,6 +58,13 @@ enum MonthlyBillingLineKind {
   SERVICE
 }
 
+enum TuitionBillingLineKind {
+  TUITION
+  MONTHLY_BASE
+  SERVICE
+  CREDIT
+}
+
 enum Gender {
   FEMALE
   MALE
@@ -150,6 +157,8 @@ model User {
   blocked   Boolean  @default(false)
   /// Première connexion : l'utilisateur doit définir un nouveau mot de passe.
   mustChangePassword Boolean @default(false)
+  /// Si true : scolarité en 10 mensualités (sept.–juin). Sinon : une facture annuelle.
+  monthlyPaymentPlanEnabled Boolean @default(false)
 
   children  Child[]
   validatedEnrollments Enrollment[] @relation("EnrollmentValidatedBy")
@@ -396,6 +405,7 @@ model ServiceTariff {
   subscriptions EnrollmentServiceSubscription[]
   levelPrices   ServiceLevelPrice[]
   installmentLines MonthlyInstallmentLine[]
+  tuitionChargeLines TuitionChargeLine[]
   variants      ServiceOptionVariant[]
 
   createdAt DateTime @default(now())
@@ -492,7 +502,7 @@ model EnrollmentServiceSubscription {
   @@id([enrollmentId, serviceTariffId])
 }
 
-/// Scolarité annuelle : une ligne par inscription et par année scolaire ; payable seulement une fois validée.
+/// Facture de scolarité (frais une fois) ou forfait annuel (scolarité + mensualités) selon l’échéancier.
 model TuitionCharge {
   id             String        @id @default(uuid())
   enrollmentId String
@@ -502,12 +512,29 @@ model TuitionCharge {
   status         PaymentStatus @default(PENDING)
   paidAt         DateTime?
   transactionRef String?
+  lines          TuitionChargeLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([enrollmentId, schoolYear])
   @@index([enrollmentId])
+}
+
+model TuitionChargeLine {
+  id              String                 @id @default(uuid())
+  chargeId        String
+  charge          TuitionCharge          @relation(fields: [chargeId], references: [id], onDelete: Cascade)
+  kind            TuitionBillingLineKind
+  serviceTariffId String?
+  serviceTariff   ServiceTariff?         @relation(fields: [serviceTariffId], references: [id], onDelete: SetNull)
+  label           String
+  quantity        Int                    @default(1)
+  unitAmountCents Int
+  amountCents     Int
+  sortOrder       Int                    @default(0)
+
+  @@index([chargeId])
 }
 
 /// Échéance mensuelle (mensualité + services) avec détail des lignes.
@@ -763,7 +790,10 @@ model Workshop {
   description    String?
   importantInfo  String?
   imageUrl       String
+  /// Date de commencement (inclusive).
   eventDate      DateTime @db.Date
+  /// Date de fin (inclusive). Un atelier d’un jour a endDate = eventDate.
+  endDate        DateTime @db.Date
   startTime      String
   endTime        String
   location       String?
@@ -782,6 +812,7 @@ model Workshop {
   updatedAt DateTime @updatedAt
 
   @@index([eventDate])
+  @@index([endDate])
   @@index([published])
 }
 

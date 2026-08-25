@@ -834,6 +834,7 @@ export class AdminAccountingService {
     };
 
     const bills: BillRow[] = [];
+    const enrollmentsWithMonthlies = new Set(monthlyRows.map((m) => m.enrollmentId));
 
     for (const t of tuitionRows) {
       const c = t.enrollment.child;
@@ -843,7 +844,7 @@ export class AdminAccountingService {
         kind: 'tuition',
         studentName,
         className: t.enrollment.class?.name ?? t.enrollment.level.name,
-        label: 'Scolarité annuelle',
+        label: enrollmentsWithMonthlies.has(t.enrollmentId) ? 'Scolarité' : 'Facture annuelle',
         detail: `Année ${t.schoolYear}`,
         amountCents: t.amountCents,
         schoolYear: t.schoolYear,
@@ -959,6 +960,7 @@ export class AdminAccountingService {
 
     let exactMatch: Match | null = null;
     const partialMatches: Match[] = [];
+    const enrollmentsWithMonthlies = new Set(monthlyRows.map((m) => m.enrollmentId));
 
     const consider = (inv: string, candidate: Match) => {
       if (inv === needle) {
@@ -979,7 +981,7 @@ export class AdminAccountingService {
         invoiceNumber: inv,
         studentName: `${c.firstName} ${c.lastName}`.trim(),
         className: t.enrollment.class?.name ?? t.enrollment.level.name,
-        label: 'Scolarité annuelle',
+        label: enrollmentsWithMonthlies.has(t.enrollmentId) ? 'Scolarité' : 'Facture annuelle',
         detail: `Année ${t.schoolYear}`,
         amountCents: t.amountCents,
         schoolYear: t.schoolYear,

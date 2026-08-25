@@ -530,6 +530,7 @@ export class PaymentsService {
       this.prisma.tuitionCharge.findMany({
         where: { enrollmentId },
         orderBy: { schoolYear: 'desc' },
+        include: { lines: { orderBy: { sortOrder: 'asc' } } },
       }),
       this.prisma.monthlyInstallment.findMany({
         where: { enrollmentId },

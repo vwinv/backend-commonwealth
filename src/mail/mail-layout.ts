@@ -9,6 +9,15 @@ import { SCHOOL_CONTACT_DEFAULTS } from '../config/school-contact';
 const MAIL_BLUE = '#216EC2';
 const MAIL_BLUE_RECAP_BG = '#e9f5fc';
 
+/** UUID Prisma / catalogues — jamais affichés dans un e-mail parent. */
+const TECHNICAL_ID_RE =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+export function stripTechnicalIds(value: string): string {
+  if (!value) return value;
+  return value.replace(TECHNICAL_ID_RE, '—');
+}
+
 export type MailRecapRow = {
   label: string;
   value: string;

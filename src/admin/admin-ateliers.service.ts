@@ -3,6 +3,14 @@ import { Prisma, UserRole, WorkshopAccountKind, WorkshopReservationStatus } from
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import {
+  formatDateRangeLongFr,
+  formatDateRangeShortFr,
+  isoDateKey,
+  parseEventDate,
+  resolveWorkshopDates,
+  workshopEnd,
+} from '../workshops/workshop-date.util';
 
 function parseRequiredString(raw: unknown, label: string): string {
   const s = String(raw ?? '').trim();
@@ -13,14 +21,6 @@ function parseRequiredString(raw: unknown, label: string): string {
 function parseOptionalString(raw: unknown): string | null {
   const s = String(raw ?? '').trim();
   return s || null;
-}
-
-function parseEventDate(raw: unknown): Date {
-  const s = String(raw ?? '').trim();
-  if (!s) throw new BadRequestException('La date est obligatoire.');
-  const d = new Date(s.length <= 10 ? `${s}T12:00:00` : s);
-  if (Number.isNaN(d.getTime())) throw new BadRequestException('Date invalide.');
-  return d;
 }
 
 function parseCapacity(raw: unknown): number {
@@ -43,21 +43,27 @@ function parseStatus(raw: unknown): WorkshopReservationStatus {
   throw new BadRequestException('Statut de réservation invalide.');
 }
 
-function formatDateLongFr(d: Date): string {
-  return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' });
-}
-
-function formatDateShortFr(d: Date): string {
-  return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-
 function formatTimeLabel(start: string, end: string): string {
   const fmt = (t: string) => t.replace(':', 'H');
   return `${fmt(start)} à ${fmt(end)}`;
 }
 
-function formatSessionLabel(date: Date, start: string, end: string): string {
-  return `${formatDateShortFr(date)}, ${start} - ${end}`;
+function formatSessionLabel(start: Date, end: Date, startTime: string, endTime: string): string {
+  return `${formatDateRangeShortFr(start, end)}, ${startTime} - ${endTime}`;
+}
+
+function workshopDateFields(w: { eventDate: Date; endDate?: Date | null; startTime: string; endTime: string }) {
+  const end = workshopEnd(w);
+  const dateLabel = formatDateRangeLongFr(w.eventDate, end);
+  return {
+    date: dateLabel,
+    dateLabel,
+    dateValue: isoDateKey(w.eventDate),
+    endDateValue: isoDateKey(end),
+    time: `De ${formatTimeLabel(w.startTime, w.endTime)}`,
+    startTime: w.startTime,
+    endTime: w.endTime,
+  };
 }
 
 function formatReservedAt(d: Date): string {
@@ -116,7 +122,7 @@ export class AdminAteliersService {
     const workshops = await this.prisma.workshop.findMany({
       where: {
         published: true,
-        eventDate: { gte: today },
+        endDate: { gte: today },
       },
       orderBy: [{ eventDate: 'asc' }, { startTime: 'asc' }],
     });
@@ -143,17 +149,13 @@ export class AdminAteliersService {
           title: w.title,
           description: w.description ?? '',
           image: w.imageUrl,
-          date: formatDateLongFr(w.eventDate),
-          time: `De ${formatTimeLabel(w.startTime, w.endTime)}`,
+          ...workshopDateFields(w),
           age: w.ageRange || w.recommendedAge || '—',
           price: w.isFree ? 'Gratuit' : w.priceLabel || '—',
           location: w.location ?? '',
           capacity: w.capacity,
           closed,
           placesRemaining: closed ? 0 : Math.max(0, w.capacity - used),
-          dateValue: w.eventDate.toISOString().slice(0, 10),
-          startTime: w.startTime,
-          endTime: w.endTime,
         };
       }),
     };
@@ -182,17 +184,13 @@ export class AdminAteliersService {
       description: workshop.description ?? '',
       importantInfo: workshop.importantInfo ?? '',
       image: workshop.imageUrl,
-      date: formatDateLongFr(workshop.eventDate),
-      dateValue: workshop.eventDate.toISOString().slice(0, 10),
-      time: `De ${formatTimeLabel(workshop.startTime, workshop.endTime)}`,
+      ...workshopDateFields(workshop),
       age: workshop.ageRange || workshop.recommendedAge || '—',
       price: workshop.isFree ? 'Gratuit' : workshop.priceLabel || '—',
       location: workshop.location ?? '',
       capacity: workshop.capacity,
       closed,
       placesRemaining,
-      startTime: workshop.startTime,
-      endTime: workshop.endTime,
     };
   }
 
@@ -208,6 +206,9 @@ export class AdminAteliersService {
     if (!workshop) throw new NotFoundException('Atelier introuvable.');
     if (workshop.closed) {
       throw new BadRequestException('Cet atelier est clôturé : plus aucune réservation n’est possible.');
+    }
+    if (isoDateKey(workshopEnd(workshop)) < isoDateKey(startOfToday())) {
+      throw new BadRequestException('Cet atelier est terminé : plus aucune réservation n’est possible.');
     }
 
     const fullName = parseRequiredString(body.fullName ?? body.parentName, 'Le nom');
@@ -348,7 +349,7 @@ export class AdminAteliersService {
       },
     });
 
-    const dateLabel = formatDateLongFr(workshop.eventDate);
+    const dateLabel = formatDateRangeLongFr(workshop.eventDate, workshopEnd(workshop));
     const timeLabel = `De ${formatTimeLabel(workshop.startTime, workshop.endTime)}`;
 
     await this.mail
@@ -392,12 +393,18 @@ export class AdminAteliersService {
     const dateFrom = String(query.dateFrom ?? '').trim();
     const dateTo = String(query.dateTo ?? '').trim();
 
-    const workshopDateFilter: Prisma.DateTimeFilter = {};
-    if (dateFrom) workshopDateFilter.gte = new Date(`${dateFrom}T00:00:00`);
-    if (dateTo) workshopDateFilter.lte = new Date(`${dateTo}T23:59:59`);
+    const dateOverlap: Prisma.WorkshopWhereInput =
+      dateFrom || dateTo
+        ? {
+            AND: [
+              ...(dateTo ? [{ eventDate: { lte: new Date(`${dateTo}T23:59:59`) } }] : []),
+              ...(dateFrom ? [{ endDate: { gte: new Date(`${dateFrom}T00:00:00`) } }] : []),
+            ],
+          }
+        : {};
 
     const workshopWhere: Prisma.WorkshopWhereInput = {
-      ...(Object.keys(workshopDateFilter).length ? { eventDate: workshopDateFilter } : {}),
+      ...dateOverlap,
       ...(search
         ? {
             OR: [
@@ -410,9 +417,7 @@ export class AdminAteliersService {
     };
 
     const reservationWhere: Prisma.WorkshopReservationWhereInput = {
-      ...(Object.keys(workshopDateFilter).length
-        ? { workshop: { eventDate: workshopDateFilter } }
-        : {}),
+      ...(Object.keys(dateOverlap).length ? { workshop: dateOverlap } : {}),
       ...(search
         ? {
             OR: [
@@ -460,7 +465,12 @@ export class AdminAteliersService {
         }),
         this.prisma.workshopReservation.count(),
         this.prisma.workshopReservation.count({
-          where: { workshop: { eventDate: { gte: todayStart, lte: todayEnd } } },
+          where: {
+            workshop: {
+              eventDate: { lte: todayEnd },
+              endDate: { gte: todayStart },
+            },
+          },
         }),
         this.prisma.workshopReservation.count({ where: { status: WorkshopReservationStatus.VALIDEE } }),
         this.prisma.workshopReservation.count({ where: { status: WorkshopReservationStatus.EN_ATTENTE } }),
@@ -486,11 +496,8 @@ export class AdminAteliersService {
         description: w.description ?? '',
         importantInfo: w.importantInfo ?? '',
         image: w.imageUrl,
-        dateLabel: formatDateLongFr(w.eventDate),
-        dateValue: w.eventDate.toISOString().slice(0, 10),
+        ...workshopDateFields(w),
         timeLabel: formatTimeLabel(w.startTime, w.endTime),
-        startTime: w.startTime,
-        endTime: w.endTime,
         location: w.location ?? '',
         ageLabel: w.ageRange || w.recommendedAge || '—',
         ageRange: w.ageRange ?? '',
@@ -514,9 +521,15 @@ export class AdminAteliersService {
           childAge: r.childAge ?? 0,
           parentName: r.parentName,
           parentPhone: r.parentPhone ?? '',
-          sessionLabel: formatSessionLabel(r.workshop.eventDate, r.workshop.startTime, r.workshop.endTime),
-          sessionDate: r.workshop.eventDate.toISOString().slice(0, 10),
-          sessionDateLabel: formatDateShortFr(r.workshop.eventDate),
+          sessionLabel: formatSessionLabel(
+            r.workshop.eventDate,
+            workshopEnd(r.workshop),
+            r.workshop.startTime,
+            r.workshop.endTime,
+          ),
+          sessionDate: isoDateKey(r.workshop.eventDate),
+          sessionEndDate: isoDateKey(workshopEnd(r.workshop)),
+          sessionDateLabel: formatDateRangeShortFr(r.workshop.eventDate, workshopEnd(r.workshop)),
           sessionTimeLabel: `${r.workshop.startTime} - ${r.workshop.endTime}`,
           places: `${r.places}/${r.workshop.capacity}`,
           ageRange: r.workshop.ageRange || r.workshop.recommendedAge || '—',
@@ -557,12 +570,14 @@ export class AdminAteliersService {
         description: workshop.description ?? '',
         importantInfo: workshop.importantInfo ?? '',
         image: workshop.imageUrl,
-        dateLabel: formatDateLongFr(workshop.eventDate),
-        dateValue: workshop.eventDate.toISOString().slice(0, 10),
+        ...workshopDateFields(workshop),
         timeLabel: `De ${formatTimeLabel(workshop.startTime, workshop.endTime)}`,
-        sessionLabel: formatSessionLabel(workshop.eventDate, workshop.startTime, workshop.endTime),
-        startTime: workshop.startTime,
-        endTime: workshop.endTime,
+        sessionLabel: formatSessionLabel(
+          workshop.eventDate,
+          workshopEnd(workshop),
+          workshop.startTime,
+          workshop.endTime,
+        ),
         location: workshop.location ?? '',
         ageLabel: workshop.ageRange || workshop.recommendedAge || '—',
         ageRange: workshop.ageRange ?? '',
@@ -611,6 +626,7 @@ export class AdminAteliersService {
         importantInfo: source.importantInfo,
         imageUrl: source.imageUrl,
         eventDate: source.eventDate,
+        endDate: source.endDate,
         startTime: source.startTime,
         endTime: source.endTime,
         location: source.location,
@@ -630,7 +646,8 @@ export class AdminAteliersService {
     const description = parseRequiredString(body.description, 'La description');
     const importantInfo = parseOptionalString(body.importantInfo);
     const imageUrl = parseRequiredString(body.imageUrl, "L'image de l'atelier");
-    const eventDate = parseEventDate(body.date ?? body.eventDate);
+    const startDate = parseEventDate(body.date ?? body.eventDate ?? body.startDate, 'La date de commencement');
+    const { eventDate, endDate } = resolveWorkshopDates(startDate, body.endDate ?? body.dateEnd);
     const startTime = parseRequiredString(body.startTime, "L'heure de début");
     const endTime = parseRequiredString(body.endTime, "L'heure de fin");
     const location = parseRequiredString(body.location, 'Le lieu');
@@ -648,6 +665,7 @@ export class AdminAteliersService {
         importantInfo,
         imageUrl,
         eventDate,
+        endDate,
         startTime,
         endTime,
         location,
@@ -670,7 +688,8 @@ export class AdminAteliersService {
     const importantInfo = parseOptionalString(body.importantInfo);
     const imageFromBody = parseOptionalString(body.imageUrl);
     const imageUrl = imageFromBody || existing.imageUrl;
-    const eventDate = parseEventDate(body.date ?? body.eventDate);
+    const startDate = parseEventDate(body.date ?? body.eventDate ?? body.startDate, 'La date de commencement');
+    const { eventDate, endDate } = resolveWorkshopDates(startDate, body.endDate ?? body.dateEnd);
     const startTime = parseRequiredString(body.startTime, "L'heure de début");
     const endTime = parseRequiredString(body.endTime, "L'heure de fin");
     const location = parseRequiredString(body.location, 'Le lieu');
@@ -692,6 +711,7 @@ export class AdminAteliersService {
         importantInfo,
         imageUrl,
         eventDate,
+        endDate,
         startTime,
         endTime,
         location,
@@ -745,6 +765,9 @@ export class AdminAteliersService {
     if (!workshop) throw new NotFoundException('Atelier introuvable.');
     if (workshop.closed) {
       throw new BadRequestException('Cet atelier est clôturé : plus aucune réservation n’est possible.');
+    }
+    if (isoDateKey(workshopEnd(workshop)) < isoDateKey(startOfToday())) {
+      throw new BadRequestException('Cet atelier est terminé : plus aucune réservation n’est possible.');
     }
 
     const childName = parseRequiredString(body.childName, "Le nom de l'enfant");
@@ -802,7 +825,10 @@ export class AdminAteliersService {
         existing.user?.email?.trim() ||
         null;
       if (to) {
-        const dateLabel = formatDateLongFr(existing.workshop.eventDate);
+        const dateLabel = formatDateRangeLongFr(
+          existing.workshop.eventDate,
+          workshopEnd(existing.workshop),
+        );
         const timeLabel = `De ${formatTimeLabel(existing.workshop.startTime, existing.workshop.endTime)}`;
         await this.mail
           .sendWorkshopReservationDecision({

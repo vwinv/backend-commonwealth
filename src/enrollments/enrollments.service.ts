@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { ConfigService } from '@nestjs/config';
 import { EnrollmentStatus, Gender, ParentRelation, Prisma, SchoolYearStatus, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import * as crypto from 'crypto';
+import { generateTempPassword } from '../auth/temp-password';
 import { BillingService } from '../billing/billing.service';
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -32,14 +32,6 @@ function parseParentRelation(raw: unknown): ParentRelation | null {
   if (s === 'FATHER' || s === 'PERE') return ParentRelation.FATHER;
   if (s === 'MOTHER' || s === 'MERE') return ParentRelation.MOTHER;
   return null;
-}
-
-function generateTempPassword(length = 12): string {
-  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.randomBytes(length);
-  let s = '';
-  for (let i = 0; i < length; i++) s += chars[bytes[i]! % chars.length]!;
-  return s;
 }
 
 function parseGender(raw: unknown): Gender {
@@ -125,31 +117,28 @@ export class EnrollmentsService {
     const relPatch = parentRelation != null ? { parentRelation } : {};
     const addrPatch =
       parentAddress != null && parentAddress.trim() !== '' ? { address: parentAddress.trim() } : {};
+    const profilePatch = {
+      fullName: fullName ?? undefined,
+      phone: phone ?? undefined,
+      role: UserRole.PARENT,
+      ...relPatch,
+      ...addrPatch,
+    };
 
-    if (existing && !issueNewPassword) {
+    // Un mot de passe déjà stocké ne doit jamais être écrasé pendant l’inscription
+    // (l’étape santé / options rappelait ensure() avec issueNewPassword=true et invalidait l’e-mail).
+    if (existing?.passwordHash) {
       await tx.user.update({
         where: { id: existing.id },
-        data: {
-          fullName: fullName ?? undefined,
-          phone: phone ?? undefined,
-          role: UserRole.PARENT,
-          ...relPatch,
-          ...addrPatch,
-        },
+        data: profilePatch,
       });
       return { parentId: existing.id, plainPasswordForEmail: null };
     }
 
-    // Compte actif (mot de passe déjà personnalisé) : pas de nouveau mot de passe.
-    if (existing?.passwordHash && !existing.mustChangePassword) {
+    if (existing && !issueNewPassword) {
       await tx.user.update({
         where: { id: existing.id },
-        data: {
-          fullName: fullName ?? undefined,
-          phone: phone ?? undefined,
-          ...relPatch,
-          ...addrPatch,
-        },
+        data: profilePatch,
       });
       return { parentId: existing.id, plainPasswordForEmail: null };
     }
@@ -161,13 +150,9 @@ export class EnrollmentsService {
       await tx.user.update({
         where: { id: existing.id },
         data: {
+          ...profilePatch,
           passwordHash,
           mustChangePassword: true,
-          fullName: fullName ?? undefined,
-          phone: phone ?? undefined,
-          role: UserRole.PARENT,
-          ...relPatch,
-          ...addrPatch,
         },
       });
       return { parentId: existing.id, plainPasswordForEmail: plainPassword };
@@ -189,8 +174,8 @@ export class EnrollmentsService {
   }
 
   /**
-   * Si le parent est encore sur un mot de passe provisoire (mustChangePassword) mais qu'on n'a
-   * pas le clair (ex. compte créé à l'étape famille), en génère un nouveau pour l'e-mail final.
+   * N’émet un mot de passe clair que s’il vient d’être créé dans cette transaction.
+   * Ne jamais en générer un nouveau : ça casserait le mot de passe déjà envoyé par e-mail.
    */
   private async issueProvisionalPasswordForEmailIfNeeded(
     tx: Pick<PrismaService, 'user'>,
@@ -201,9 +186,9 @@ export class EnrollmentsService {
 
     const user = await tx.user.findUnique({
       where: { id: parentId },
-      select: { mustChangePassword: true, passwordHash: true },
+      select: { passwordHash: true },
     });
-    if (!user?.mustChangePassword) return null;
+    if (user?.passwordHash) return null;
 
     const plainPassword = generateTempPassword();
     const passwordHash = await bcrypt.hash(plainPassword, BCRYPT_ROUNDS);
@@ -738,6 +723,7 @@ export class EnrollmentsService {
         parentPhone,
         parentRelation,
         parentAddress,
+        { issueNewPassword: false },
       );
 
       let child: { id: string };
@@ -1222,16 +1208,26 @@ export class EnrollmentsService {
     const enrollment = await this.prisma.enrollment.findUnique({
       where: { id },
       include: {
-        child: { include: { parent: true } },
+        child: {
+          include: {
+            parent: true,
+            healthRecord: {
+              include: {
+                vaccinations: { orderBy: { createdAt: 'asc' } },
+              },
+            },
+          },
+        },
         level: true,
         class: true,
+        schedule: true,
         payments: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
         tuitionCharges: true,
         monthlyInstallments: {
           orderBy: [{ year: 'desc' }, { month: 'desc' }],
           include: { lines: { include: { serviceTariff: true } } },
         },
-        serviceSubscriptions: { include: { serviceTariff: true } },
+        serviceSubscriptions: { include: { serviceTariff: true, variant: true } },
       },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found');

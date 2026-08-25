@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { EnrollmentStatus, ParentRelation, PaymentStatus, Prisma, UserRole } from '@prisma/client';
+import { BillingService } from '../billing/billing.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminStudentsService } from './admin-students.service';
 
@@ -18,6 +19,7 @@ export class AdminParentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly students: AdminStudentsService,
+    private readonly billing: BillingService,
   ) {}
 
   private paidApprovedEnrollmentWhere(): Prisma.EnrollmentWhereInput {
@@ -100,6 +102,7 @@ export class AdminParentsService {
           phone: true,
           parentRelation: true,
           blocked: true,
+          monthlyPaymentPlanEnabled: true,
           createdAt: true,
           _count: { select: { children: true } },
           children: {
@@ -126,6 +129,7 @@ export class AdminParentsService {
         childrenCount: u.children.length,
         totalChildrenCount: u._count.children,
         blocked: u.blocked,
+        monthlyPaymentPlanEnabled: u.monthlyPaymentPlanEnabled,
       })),
       total,
       page,
@@ -169,6 +173,7 @@ export class AdminParentsService {
       parentRelation: u.parentRelation,
       relationLabel: parentRelationLabelFr(u.parentRelation),
       blocked: u.blocked,
+      monthlyPaymentPlanEnabled: u.monthlyPaymentPlanEnabled,
       createdAt: u.createdAt.toISOString(),
       children: u.children.map((c) => {
         const e = c.enrollments[0];
@@ -203,6 +208,29 @@ export class AdminParentsService {
       data: { blocked },
     });
     return { id: parentId, blocked };
+  }
+
+  async setMonthlyPaymentPlan(parentId: string, enabled: boolean) {
+    const u = await this.prisma.user.findFirst({
+      where: { id: parentId, role: UserRole.PARENT },
+      select: { id: true },
+    });
+    if (!u) {
+      throw new NotFoundException('Parent introuvable');
+    }
+
+    await this.prisma.user.update({
+      where: { id: parentId },
+      data: { monthlyPaymentPlanEnabled: enabled },
+    });
+
+    const billing = await this.billing.syncApprovedBillingForParent(parentId);
+
+    return {
+      id: parentId,
+      monthlyPaymentPlanEnabled: enabled,
+      enrollmentsUpdated: billing.enrollmentsUpdated,
+    };
   }
 
   async remove(parentId: string) {

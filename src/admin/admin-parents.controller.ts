@@ -46,6 +46,9 @@ export class AdminParentsController {
 
   @Patch(':id')
   patch(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    if (typeof body.monthlyPaymentPlanEnabled === 'boolean') {
+      return this.parents.setMonthlyPaymentPlan(id, body.monthlyPaymentPlanEnabled);
+    }
     if (typeof body.blocked === 'boolean') {
       return this.parents.setBlocked(id, body.blocked);
     }

@@ -212,6 +212,47 @@ export class ParentInvoicePdfService {
     return name.replace(/[^\w.\-]+/g, '_').replace(/_+/g, '_');
   }
 
+  /** Facture annuelle (scolarité + mensualités) vs frais de scolarité seuls (échéancier). */
+  private async isAnnualPackageInvoice(enrollmentId: string, parentUserId: string): Promise<boolean> {
+    const [parent, monthlyCount] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: parentUserId },
+        select: { monthlyPaymentPlanEnabled: true },
+      }),
+      this.prisma.monthlyInstallment.count({ where: { enrollmentId } }),
+    ]);
+    return !parent?.monthlyPaymentPlanEnabled && monthlyCount === 0;
+  }
+
+  private tuitionDocumentLines(
+    charge: {
+      amountCents: number;
+      lines?: Array<{ label: string; quantity: number; unitAmountCents: number; amountCents: number }>;
+    },
+    levelName: string,
+    annualPackage: boolean,
+  ): ParentInvoiceLine[] {
+    const stored = charge.lines ?? [];
+    if (stored.length) {
+      return stored.map((l) => ({
+        description: l.label,
+        qty: String(l.quantity),
+        unitPrice: formatXofFromCents(l.unitAmountCents),
+        amount: formatXofFromCents(l.amountCents),
+      }));
+    }
+    return [
+      {
+        description: annualPackage
+          ? `Scolarité + mensualités — ${levelName}`
+          : `Frais de scolarité — ${levelName}`,
+        qty: '1',
+        unitPrice: formatXofFromCents(charge.amountCents),
+        amount: formatXofFromCents(charge.amountCents),
+      },
+    ];
+  }
+
   async tuitionPdf(
     userId: string,
     chargeId: string,
@@ -223,6 +264,7 @@ export class ParentInvoicePdfService {
       },
       include: {
         enrollment: { select: enrollmentChildSelect },
+        lines: { orderBy: { sortOrder: 'asc' } },
       },
     });
     if (!charge) throw new NotFoundException('Facture introuvable');
@@ -231,18 +273,17 @@ export class ParentInvoicePdfService {
     const b = this.branding();
     const logoDataUri = this.getLogoDataUri();
     const levelName = charge.enrollment.level?.name?.trim() || '—';
+    const hasPackageLines = charge.lines.some(
+      (l) => l.kind === 'MONTHLY_BASE' || l.kind === 'SERVICE',
+    );
+    const annualPackage =
+      hasPackageLines ||
+      (charge.lines.length === 0 && (await this.isAnnualPackageInvoice(charge.enrollment.id, userId)));
     const y = Number(charge.schoolYear.trim().match(/^(\d{4})/)?.[1] ?? new Date().getFullYear());
     const inv = stableInvoiceNumber(y, charge.id);
-    const lines: ParentInvoiceLine[] = [
-      {
-        description: `Frais de scolarité — ${levelName}`,
-        qty: '1',
-        unitPrice: formatXofFromCents(charge.amountCents),
-        amount: formatXofFromCents(charge.amountCents),
-      },
-    ];
+    const lines = this.tuitionDocumentLines(charge, levelName, annualPackage);
     const html = buildParentInvoiceHtml({
-      documentTitle: 'Facture de scolarité',
+      documentTitle: annualPackage ? 'Facture annuelle' : 'Facture de scolarité',
       schoolDisplayName: b.schoolDisplayName,
       headerSubline: `${b.contactEmail} · Année scolaire ${charge.schoolYear}`,
       contactEmail: b.contactEmail,
@@ -264,7 +305,9 @@ export class ParentInvoicePdfService {
       generatedDateFr: this.issueDateFr(),
     });
     const buffer = await this.htmlToPdfBuffer(html);
-    const filename = this.safeFilename(`Facture-scolarite-${inv}.pdf`);
+    const filename = this.safeFilename(
+      `${annualPackage ? 'Facture-annuelle' : 'Facture-scolarite'}-${inv}.pdf`,
+    );
     return { buffer, filename };
   }
 
@@ -398,6 +441,7 @@ export class ParentInvoicePdfService {
       },
       include: {
         enrollment: { select: enrollmentChildSelect },
+        lines: { orderBy: { sortOrder: 'asc' } },
       },
     });
     if (!charge) throw new NotFoundException('Reçu introuvable');
@@ -409,15 +453,19 @@ export class ParentInvoicePdfService {
     const b = this.branding();
     const logoDataUri = this.getLogoDataUri();
     const levelName = charge.enrollment.level?.name?.trim() || '—';
+    const hasPackageLines = charge.lines.some(
+      (l) => l.kind === 'MONTHLY_BASE' || l.kind === 'SERVICE',
+    );
+    const annualPackage =
+      hasPackageLines ||
+      (charge.lines.length === 0 && (await this.isAnnualPackageInvoice(charge.enrollment.id, userId)));
     const yearInv = Number(charge.schoolYear.trim().match(/^(\d{4})/)?.[1] ?? new Date().getFullYear());
     const inv = stableInvoiceNumber(yearInv, charge.id);
     const rec = stableReceiptNumber(yearInv, charge.id);
-    const lines: ParentReceiptLine[] = [
-      {
-        description: `Frais de scolarité — ${levelName}`,
-        amount: formatXofFromCents(charge.amountCents),
-      },
-    ];
+    const lines: ParentReceiptLine[] = this.tuitionDocumentLines(charge, levelName, annualPackage).map((l) => ({
+      description: l.qty !== '1' ? `${l.description} × ${l.qty}` : l.description,
+      amount: l.amount,
+    }));
     const medicalTags = parseMedicalTags(charge.enrollment.child.allergies);
     const payDate = charge.paidAt ?? charge.updatedAt;
     const html = buildParentReceiptHtml({

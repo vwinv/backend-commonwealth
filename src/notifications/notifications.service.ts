@@ -44,6 +44,27 @@ export class NotificationsService {
     });
   }
 
+  async notifyEnrollmentDossierUpdated(params: {
+    parentId: string;
+    enrollmentId: string;
+    childName: string;
+    body: string;
+  }) {
+    const excerpt = params.body.trim().replace(/\s+/g, ' ').slice(0, 420);
+    await this.prisma.notification.create({
+      data: {
+        userId: params.parentId,
+        enrollmentId: params.enrollmentId,
+        channel: `enrollment:updated:${params.enrollmentId}:${Date.now()}`,
+        title: `Dossier d’inscription modifié — ${params.childName}`,
+        body:
+          excerpt ||
+          `L’administration a modifié le dossier d’inscription de ${params.childName}. Consultez les détails dans l’e-mail ou votre espace parent.`,
+        kind: 'ENROLLMENT_UPDATED',
+      },
+    });
+  }
+
   async notifyEnrollmentRejected(enrollmentId: string) {
     const e = await this.prisma.enrollment.findUnique({
       where: { id: enrollmentId },

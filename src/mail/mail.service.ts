@@ -11,6 +11,7 @@ import {
   buildAdministrativeEmailHtml,
   buildAdministrativeEmailText,
   escapeHtml,
+  stripTechnicalIds,
   type AdministrativeMailContent,
   type MailRecapRow,
 } from './mail-layout';
@@ -19,6 +20,13 @@ function loginUrlFromConfig(config: ConfigService): string {
   return (
     config.get<string>('PARENT_PORTAL_LOGIN_URL')?.trim() || 'http://localhost:3000/parent/login'
   );
+}
+
+function plainTextToMailHtml(text: string): string {
+  const escaped = escapeHtml(text);
+  const blocks = escaped.split(/\n{2,}/).filter((p) => p.length > 0);
+  if (!blocks.length) return '<p style="margin:0;"></p>';
+  return blocks.map((p) => `<p style="margin:0 0 12px;">${p.replace(/\n/g, '<br />')}</p>`).join('');
 }
 
 function parentCredentialsRecapRows(
@@ -138,6 +146,18 @@ export type EnrollmentApprovedMailParams = {
   parentPhone?: string | null;
   schoolYear: string;
   childLine: string;
+};
+
+export type EnrollmentDossierUpdatedMailParams = {
+  to: string;
+  parentName: string | null;
+  parentPhone?: string | null;
+  schoolYear: string;
+  childLine: string;
+  /** Objet (partie variable) — l’admin peut le modifier avant envoi. */
+  subject: string;
+  /** Corps en texte brut — l’admin peut le modifier avant envoi. */
+  body: string;
 };
 
 export type WorkshopReservationMailParams = {
@@ -325,7 +345,7 @@ export class MailService {
       const m = t.schoolYear.match(/^(\d{4})/);
       const y = m ? parseInt(m[1]!, 10) : 0;
       lines.push({
-        reference: `Scolarité annuelle — ${t.schoolYear}`,
+        reference: `Scolarité — ${t.schoolYear}`,
         amountLabel: this.formatXofParent(t.amountCents),
         dueDateLabel: this.tuitionDueFrench(t.schoolYear),
         studentName: child,
@@ -473,25 +493,75 @@ export class MailService {
     const secure = secureFlag === 'true' || secureFlag === '1';
     const user =
       this.config.get<string>('SMTP_USER')?.trim() || this.config.get<string>('MAIL_USER')?.trim();
-    const pass = this.config.get<string>('SMTP_PASS') ?? this.config.get<string>('MAIL_PASS');
+    const rawPass = this.config.get<string>('SMTP_PASS') ?? this.config.get<string>('MAIL_PASS');
+    const pass =
+      rawPass === undefined || rawPass === ''
+        ? undefined
+        : String(rawPass)
+            .trim()
+            .replace(/^["']|["']$/g, '');
 
     return nodemailer.createTransport({
       host,
       port,
       secure,
-      auth:
-        user && pass !== undefined && pass !== ''
-          ? { user, pass: String(pass) }
-          : undefined,
+      auth: user && pass ? { user, pass } : undefined,
     });
+  }
+
+  private smtpUser(): string | undefined {
+    return this.config.get<string>('SMTP_USER')?.trim() || this.config.get<string>('MAIL_USER')?.trim();
+  }
+
+  /**
+   * Gmail n’accepte (et ne délivre correctement) que si From = compte authentifié.
+   * MAIL_FROM peut rester une adresse d’affichage ; on privilégie MAIL_USER.
+   */
+  private smtpFromHeader(): string {
+    const user = this.smtpUser();
+    const configured = this.config.get<string>('MAIL_FROM')?.trim();
+    const address = user || configured || 'noreply@commonwealth.local';
+    const name = this.schoolDisplayName().replace(/"/g, '');
+    return `"${name}" <${address}>`;
+  }
+
+  private async deliverMail(opts: {
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+    attachments?: { filename: string; path: string; cid: string }[];
+  }): Promise<boolean> {
+    const transport = this.createTransport();
+    if (!transport) {
+      this.logger.warn(`E-mail non envoyé (SMTP non configuré). Destinataire : ${opts.to}`);
+      return false;
+    }
+
+    const user = this.smtpUser();
+    try {
+      const info = await transport.sendMail({
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        to: opts.to,
+        subject: stripTechnicalIds(opts.subject),
+        text: stripTechnicalIds(opts.text),
+        html: stripTechnicalIds(opts.html),
+        attachments: opts.attachments?.length ? opts.attachments : undefined,
+        envelope: user ? { from: user, to: opts.to } : undefined,
+      });
+      this.logger.log(
+        `E-mail envoyé à ${opts.to} (id=${info.messageId ?? 'n/a'}${info.response ? ` ${info.response}` : ''})`,
+      );
+      return true;
+    } catch (err) {
+      this.logger.error(`Échec envoi e-mail à ${opts.to}`, err instanceof Error ? err.stack : err);
+      return false;
+    }
   }
 
   private schoolDisplayName(): string {
     return readSchoolContact(this.config).displayName;
-  }
-
-  private mailFromDefault(): string {
-    return `${this.schoolDisplayName()} <noreply@commonwealth.local>`;
   }
 
   private adminDisplayEmail(): string {
@@ -559,10 +629,6 @@ export class MailService {
 
   /** Confirmation de pré-inscription (statut en attente côté administration). */
   async sendPreEnrollmentConfirmation(params: PreEnrollmentMailParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
-    const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Confirmation de pré-inscription — Année ${params.schoolYear}`;
     const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
@@ -676,32 +742,20 @@ export class MailService {
       schoolDisplayName: this.schoolDisplayName(),
     });
 
-    if (!transport) {
-      this.logger.warn(`E-mail non envoyé (SMTP non configuré). Destinataire : ${params.to}`);
-      return;
-    }
-
-    try {
-      await transport.sendMail({
-        from,
-        to: params.to,
-        subject,
-        text,
-        html,
-        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
-      });
-      this.logger.log(`E-mail de pré-inscription envoyé à ${params.to}`);
+    const sent = await this.deliverMail({
+      to: params.to,
+      subject,
+      text,
+      html,
+      attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+    });
+    if (sent) {
       await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
-    } catch (err) {
-      this.logger.error(`Échec envoi e-mail à ${params.to}`, err instanceof Error ? err.stack : err);
     }
   }
 
   /** Confirmation de réservation d’atelier (espace parent ou landing). */
   async sendWorkshopReservationConfirmation(params: WorkshopReservationMailParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Confirmation de réservation — ${params.workshopTitle}`;
@@ -723,7 +777,7 @@ export class MailService {
     const recapRows: MailRecapRow[] = [
       { label: 'N° de réservation', value: escapeHtml(params.reservationCode), valueTone: 'blue' },
       { label: 'Atelier', value: escapeHtml(params.workshopTitle) },
-      { label: 'Date', value: escapeHtml(params.workshopDateLabel) },
+      { label: 'Dates', value: escapeHtml(params.workshopDateLabel) },
       { label: 'Horaire', value: escapeHtml(params.workshopTimeLabel) },
       { label: 'Places réservées', value: escapeHtml(placesLabel) },
       ...(childLine
@@ -797,11 +851,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail de réservation atelier envoyé à ${params.to}`);
@@ -813,9 +869,6 @@ export class MailService {
 
   /** Décision admin : réservation d’atelier validée ou annulée. */
   async sendWorkshopReservationDecision(params: WorkshopReservationDecisionMailParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const isValidated = params.decision === 'VALIDEE';
@@ -846,7 +899,7 @@ export class MailService {
     const recapRows: MailRecapRow[] = [
       { label: 'N° de réservation', value: escapeHtml(params.reservationCode), valueTone: 'blue' },
       { label: 'Atelier', value: escapeHtml(params.workshopTitle) },
-      { label: 'Date', value: escapeHtml(params.workshopDateLabel) },
+      { label: 'Dates', value: escapeHtml(params.workshopDateLabel) },
       { label: 'Horaire', value: escapeHtml(params.workshopTimeLabel) },
       { label: 'Places réservées', value: escapeHtml(placesLabel) },
       ...(childLine
@@ -933,11 +986,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(
@@ -951,9 +1006,6 @@ export class MailService {
 
   /** Dossier d'inscription enregistré en cours de route (étape famille) — reprise possible plus tard. */
   async sendEnrollmentProgressSaved(params: EnrollmentProgressMailParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Dossier d'inscription enregistré — Année ${params.schoolYear}`;
@@ -1067,11 +1119,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail de reprise d'inscription envoyé à ${params.to}`);
@@ -1083,9 +1137,6 @@ export class MailService {
 
   /** Confirmation d’approbation d’inscription (même format administratif que la pré-inscription). */
   async sendEnrollmentApprovedConfirmation(params: EnrollmentApprovedMailParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Inscription approuvée — Année ${params.schoolYear}`;
@@ -1172,11 +1223,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail approbation envoyé à ${params.to}`);
@@ -1186,11 +1239,109 @@ export class MailService {
     }
   }
 
+  /**
+   * Notification au parent après modification admin d’un dossier encore en attente.
+   * Objet et corps sont ceux saisis / corrigés par l’administrateur.
+   */
+  async sendEnrollmentDossierUpdated(params: EnrollmentDossierUpdatedMailParams): Promise<boolean> {
+    const to = String(params.to ?? '').trim();
+    if (!to) {
+      this.logger.warn('E-mail dossier modifié non envoyé : destinataire vide.');
+      return false;
+    }
+
+    const transport = this.createTransport();
+    const mailLogo = this.getMailLogo();
+    const school = this.schoolDisplayName();
+    const prefix = `${school} — `;
+    let subjectBold =
+      stripTechnicalIds((params.subject ?? '').trim()) ||
+      `Dossier d’inscription mis à jour — ${stripTechnicalIds(params.childLine)}`;
+    if (subjectBold.startsWith(prefix)) subjectBold = subjectBold.slice(prefix.length).trim();
+    const subject = `${prefix}${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || 'Parent';
+    const bodyText =
+      stripTechnicalIds((params.body ?? '').trim()) ||
+      `L’administration a mis à jour le dossier d’inscription de ${stripTechnicalIds(params.childLine)}.`;
+    const introHtml = plainTextToMailHtml(bodyText);
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'Année scolaire', value: escapeHtml(params.schoolYear) },
+      { label: 'Élève concerné', value: escapeHtml(stripTechnicalIds(params.childLine)) || '—', valueTone: 'blue' },
+      { label: 'Statut du dossier', value: 'Dossier mis à jour', valueTone: 'blue' },
+    ];
+
+    const loginUrl = loginUrlFromConfig(this.config);
+    const footerBodyHtml = `
+      <p style="margin:0 0 12px;">Vous pouvez consulter le dossier actualisé dans votre espace parent.</p>
+      <p style="margin:0;"><a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:600;">Se connecter à l’espace parent</a></p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      ${escapeHtml(school)}<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: to,
+      toDisplayName: displayName,
+      toPhone: params.parentPhone?.trim() || null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: school,
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [to, displayName, params.parentPhone?.trim()].filter(Boolean).join(' · '),
+      introText: bodyText,
+      recapLines: [
+        `Année scolaire: ${params.schoolYear}`,
+        `Élève concerné: ${params.childLine}`,
+        'Statut: Dossier mis à jour',
+      ],
+      footerText: `Connexion espace parent : ${loginUrl}`,
+      signatureText: ['Service administratif', school, this.adminDisplayEmail(), this.adminPhone()].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: school,
+    });
+
+    if (!transport) {
+      this.logger.warn(`E-mail dossier modifié non envoyé (SMTP non configuré). Destinataire : ${to}`);
+      return false;
+    }
+
+    try {
+      await transport.sendMail({
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to } : undefined,
+        to,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
+        attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+      });
+      this.logger.log(`E-mail dossier modifié envoyé à ${to}`);
+      return true;
+    } catch (err) {
+      this.logger.error(`Échec envoi e-mail dossier modifié à ${to}`, err instanceof Error ? err.stack : err);
+      return false;
+    }
+  }
+
   /** Demande de signature de la fiche santé (espace parent). */
   async sendHealthSignatureRequest(params: HealthSignatureRequestMailParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Signature fiche santé — ${params.childName}`;
@@ -1271,11 +1422,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail demande signature fiche santé envoyé à ${params.to}`);
@@ -1290,9 +1443,6 @@ export class MailService {
 
   /** Relance lorsque le parent a plus de trois factures impayées (design identique à la messagerie administrative). */
   async sendParentMultipleUnpaidInvoicesReminder(params: MultipleUnpaidInvoicesMailParams): Promise<boolean> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
     const subjectBold = `Rappel de paiement — ${params.totalUnpaid} factures impayées`;
@@ -1383,11 +1533,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail relance factures impayées (>3) envoyé à ${params.to}`);
@@ -1403,12 +1555,7 @@ export class MailService {
 
   /** Envoyé après validation admin : mot de passe provisoire pour l’espace parent. */
   async sendParentPortalCredentials(params: ParentPortalCredentialsParams): Promise<void> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
-
     const loginUrl = loginUrlFromConfig(this.config);
-
-    const transport = this.createTransport();
     const subject = `${this.schoolDisplayName()} — Votre espace parent`;
 
     const greeting = params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,';
@@ -1445,26 +1592,118 @@ export class MailService {
 </body>
 </html>`;
 
-    if (!transport) {
-      this.logger.warn(
-        `E-mail identifiants parent non envoyé (SMTP non configuré). Destinataire : ${params.to}`,
-      );
-      return;
-    }
-
-    try {
-      await transport.sendMail({ from, to: params.to, subject, text, html });
-      this.logger.log(`E-mail identifiants parent envoyé à ${params.to}`);
+    const sent = await this.deliverMail({ to: params.to, subject, text, html });
+    if (sent) {
       await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
-    } catch (err) {
-      this.logger.error(`Échec envoi identifiants à ${params.to}`, err instanceof Error ? err.stack : err);
     }
+  }
+
+  /** Mot de passe oublié : mot de passe provisoire pour l’espace parent. */
+  async sendParentForgotPassword(params: ParentPortalCredentialsParams): Promise<boolean> {
+    const loginUrl = loginUrlFromConfig(this.config);
+    const mailLogo = this.getMailLogo();
+    const subjectBold = 'Réinitialisation de votre mot de passe — Espace parent';
+    const subject = `${this.schoolDisplayName()} — ${subjectBold}`;
+
+    const displayName = params.parentName?.trim() || params.to;
+    const greeting = params.parentName?.trim()
+      ? `Bonjour ${escapeHtml(params.parentName.trim())},`
+      : 'Bonjour,';
+
+    const introHtml = `
+      <p style="margin:0 0 12px;">${greeting}</p>
+      <p style="margin:0;">Vous avez demandé un nouveau mot de passe pour l’<strong>espace parent</strong>. Utilisez le mot de passe provisoire ci-dessous pour vous connecter, puis choisissez un mot de passe personnel depuis votre compte.</p>`;
+
+    const recapRows: MailRecapRow[] = [
+      { label: 'Identifiant (e-mail)', value: escapeHtml(params.to), valueTone: 'blue' },
+      {
+        label: 'Mot de passe provisoire',
+        value: `<span style="display:inline-block;margin-top:2px;padding:6px 12px;background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;font-family:Consolas,Monaco,monospace;font-size:16px;font-weight:700;color:#0f172a;letter-spacing:0.06em;">${escapeHtml(params.password)}</span>`,
+      },
+      {
+        label: 'Lien de connexion',
+        value: `<a href="${escapeHtml(loginUrl)}" style="color:#216EC2;font-weight:700;text-decoration:none;">${escapeHtml(loginUrl)}</a>`,
+      },
+    ];
+
+    const footerBodyHtml = `
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 18px;">
+        <tr>
+          <td align="center" style="border-radius:10px;background:#216EC2;">
+            <a href="${escapeHtml(loginUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:14px 32px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Se connecter à l’espace parent</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.65;">
+        Si vous n’êtes pas à l’origine de cette demande, contactez le service administratif. Après connexion, allez dans <strong>Modifier mon mot de passe</strong>.
+      </p>`;
+
+    const signatureBlockHtml = `
+      <strong style="font-size:15px;">Service administratif</strong><br />
+      ${escapeHtml(this.schoolDisplayName())}<br />
+      <a href="mailto:${escapeHtml(this.adminDisplayEmail())}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(this.adminDisplayEmail())}</a><br />
+      ${escapeHtml(this.adminPhone())}`;
+
+    const layout: AdministrativeMailContent = {
+      fromDisplay: this.adminDisplayEmail(),
+      toEmail: params.to,
+      toDisplayName: displayName,
+      toPhone: null,
+      subjectBold,
+      introHtml,
+      recapRows,
+      footerBodyHtml,
+      signatureBlockHtml,
+      logoUrl: mailLogo.logoUrl,
+      adminPhone: this.adminPhone(),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
+    };
+
+    const html = buildAdministrativeEmailHtml(layout);
+    const text = buildAdministrativeEmailText({
+      subjectBold,
+      fromDisplay: this.adminDisplayEmail(),
+      toLine: [params.to, displayName].filter(Boolean).join(' · '),
+      introText: [
+        params.parentName?.trim() ? `Bonjour ${params.parentName.trim()},` : 'Bonjour,',
+        '',
+        'Vous avez demandé un nouveau mot de passe pour l’espace parent.',
+        '',
+      ].join('\n'),
+      recapLines: [
+        `Identifiant (e-mail) : ${params.to}`,
+        `Mot de passe provisoire : ${params.password}`,
+        `Connexion : ${loginUrl}`,
+        '',
+        'Après connexion, modifiez ce mot de passe depuis votre espace parent.',
+      ],
+      footerText: 'Cordialement,',
+      signatureText: [
+        'Service administratif',
+        this.schoolDisplayName(),
+        this.adminDisplayEmail(),
+        this.adminPhone(),
+      ].join('\n'),
+      emergencyPhone: this.emergencyPhone(),
+      schoolDisplayName: this.schoolDisplayName(),
+    });
+
+    const sent = await this.deliverMail({
+      to: params.to,
+      subject,
+      text,
+      html,
+      attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
+    });
+    if (sent) {
+      await this.notifications.notifyEmailSentToParentEmail(params.to, subject).catch(() => undefined);
+    }
+    return sent;
   }
 
   /** Compte personnel admin créé ou mot de passe réinitialisé : gabarit messagerie administrative. */
   async sendStaffPortalCredentials(params: StaffPortalCredentialsParams): Promise<boolean> {
-    const from =
-      this.config.get<string>('MAIL_FROM')?.trim() || this.mailFromDefault();
     const loginUrl = adminLoginUrlFromConfig(this.config);
     const transport = this.createTransport();
     const mailLogo = this.getMailLogo();
@@ -1577,11 +1816,13 @@ export class MailService {
 
     try {
       await transport.sendMail({
-        from,
+        from: this.smtpFromHeader(),
+        replyTo: this.adminDisplayEmail(),
+        envelope: this.smtpUser() ? { from: this.smtpUser() as string, to: params.to } : undefined,
         to: params.to,
-        subject,
-        text,
-        html,
+        subject: stripTechnicalIds(subject),
+        text: stripTechnicalIds(text),
+        html: stripTechnicalIds(html),
         attachments: mailLogo.attachments.length ? mailLogo.attachments : undefined,
       });
       this.logger.log(`E-mail identifiants personnel envoyé à ${params.to}`);

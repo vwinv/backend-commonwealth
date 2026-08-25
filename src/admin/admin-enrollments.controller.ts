@@ -59,6 +59,12 @@ export class AdminEnrollmentsController {
     return this.enrollmentsCore.approve(id, { ...body, validatedById });
   }
 
+  /** Correction d’un dossier encore PENDING — notifie le parent (e-mail éditable). */
+  @Patch(':id')
+  updatePending(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.adminEnrollments.updatePendingDossier(id, body ?? {});
+  }
+
   @Patch(':id/reject')
   reject(@Param('id') id: string, @Req() req: AdminRequest, @Body() body: Record<string, unknown>) {
     const validatedById = req.adminUser?.sub;

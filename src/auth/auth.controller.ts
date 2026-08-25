@@ -13,6 +13,11 @@ export class AuthController {
     return this.auth.parentLogin(body);
   }
 
+  @Post('parent/forgot-password')
+  parentForgotPassword(@Body() body: { email?: string }) {
+    return this.auth.parentForgotPassword(body);
+  }
+
   @Post('admin/login')
   adminLogin(@Body() body: { email?: string; password?: string }) {
     return this.auth.adminLogin(body);

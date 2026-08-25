@@ -1,29 +1,38 @@
 import {
   BadRequestException,
   Injectable,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminPermissionsService } from './admin-permissions.service';
 import { isAdminPortalRole, isSuperAdmin, roleOptionsForApi } from './app-module-roles';
 import type { AdminJwtPayload, ParentJwtPayload } from './parent-jwt.guard';
+import { generateTempPassword } from './temp-password';
 
 const BCRYPT_ROUNDS = 10;
+const FORGOT_PASSWORD_COOLDOWN_MS = 60_000;
+const FORGOT_PASSWORD_ACK =
+  'Si un compte parent existe pour cette adresse, un mot de passe provisoire vient d’être envoyé. Vérifiez votre boîte de réception et le dossier indésirables.';
 
 @Injectable()
 export class AuthService {
+  private readonly forgotPasswordAt = new Map<string, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly adminPermissions: AdminPermissionsService,
+    private readonly mail: MailService,
   ) {}
 
   async parentLogin(body: { email?: string; password?: string }) {
     const email = String(body?.email ?? '').trim().toLowerCase();
-    const password = String(body?.password ?? '');
+    const password = String(body?.password ?? '').trim();
     if (!email || !password) {
       throw new BadRequestException('Email et mot de passe requis');
     }
@@ -50,6 +59,7 @@ export class AuthService {
 
     return {
       accessToken,
+      mustChangePassword: user.mustChangePassword,
       user: {
         id: user.id,
         email: user.email,
@@ -57,6 +67,56 @@ export class AuthService {
         phone: user.phone,
       },
     };
+  }
+
+  async parentForgotPassword(body: { email?: string }) {
+    const email = String(body?.email ?? '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      throw new BadRequestException('Adresse e-mail requise.');
+    }
+
+    const ack = { ok: true as const, message: FORGOT_PASSWORD_ACK };
+    const now = Date.now();
+    const last = this.forgotPasswordAt.get(email) ?? 0;
+    if (now - last < FORGOT_PASSWORD_COOLDOWN_MS) {
+      return ack;
+    }
+    this.forgotPasswordAt.set(email, now);
+
+    const user = await this.prisma.user.findUnique({
+      where: { email },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        role: true,
+        blocked: true,
+      },
+    });
+    if (!user || user.role !== UserRole.PARENT || user.blocked) {
+      return ack;
+    }
+
+    const temporaryPassword = generateTempPassword();
+    const sent = await this.mail.sendParentForgotPassword({
+      to: user.email,
+      parentName: user.fullName,
+      password: temporaryPassword,
+    });
+    if (!sent) {
+      this.forgotPasswordAt.delete(email);
+      throw new ServiceUnavailableException(
+        'L’envoi de l’e-mail a échoué. Réessayez dans quelques minutes ou contactez l’administration.',
+      );
+    }
+
+    const passwordHash = await bcrypt.hash(temporaryPassword, BCRYPT_ROUNDS);
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash, mustChangePassword: true },
+    });
+
+    return ack;
   }
 
   async adminLogin(body: { email?: string; password?: string }) {
