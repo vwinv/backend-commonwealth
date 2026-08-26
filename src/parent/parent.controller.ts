@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   StreamableFile,
   UploadedFile,
   UseGuards,
@@ -13,6 +14,7 @@ import {
 import { ParentJwtGuard } from '../auth/parent-jwt.guard';
 import { ParentUser } from '../auth/parent-user.decorator';
 import type { ParentJwtPayload } from '../auth/parent-jwt.guard';
+import { AdminProgrammeService } from '../admin/admin-programme.service';
 import { PaymentsService } from '../payments/payments.service';
 import { ParentInvoicePdfService } from './parent-invoice-pdf.service';
 import { ParentService } from './parent.service';
@@ -29,6 +31,7 @@ export class ParentController {
     private readonly paymentsService: PaymentsService,
     private readonly parentInvoicePdf: ParentInvoicePdfService,
     private readonly cloudinary: CloudinaryService,
+    private readonly programmeService: AdminProgrammeService,
   ) {}
 
   @Get('me')
@@ -169,18 +172,59 @@ export class ParentController {
     });
   }
 
-  /** Enregistre les paiements (scolarité ou mensualité) après confirmation — brancher la passerelle avant cet appel. */
+  /** Enregistre les paiements après confirmation PayDunya (token obligatoire). */
   @Post('payments/complete')
   completePayments(
     @ParentUser() jwt: ParentJwtPayload,
     @Body() body: Record<string, unknown>,
   ) {
-    return this.paymentsService.completeParentSchoolFees(jwt.sub, body);
+    return this.paymentsService.completeParentSchoolFees(jwt.sub, body ?? {});
+  }
+
+  @Post('payments/checkout')
+  createPaymentCheckout(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.paymentsService.createParentCheckout(jwt.sub, body ?? {});
+  }
+
+  @Post('payments/softpay')
+  triggerPaymentSoftpay(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.paymentsService.triggerParentSoftpay(jwt.sub, body ?? {});
+  }
+
+  @Get('payments/checkout/:token/status')
+  paymentCheckoutStatus(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('token') token: string,
+  ) {
+    return this.paymentsService.getParentCheckoutStatus(jwt.sub, token);
   }
 
   @Get('documents')
   documents(@ParentUser() jwt: ParentJwtPayload) {
     return this.parent.listLevelDocuments(jwt.sub);
+  }
+
+  @Get('programme/pdf')
+  async programmePdf(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Query('category') category?: string,
+  ) {
+    const { buffer, filename } = await this.parentInvoicePdf.programmePdf(jwt.sub, category);
+    return new StreamableFile(buffer, {
+      type: 'application/pdf',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  @Get('programme')
+  programme(@ParentUser() jwt: ParentJwtPayload) {
+    return this.programmeService.getParentOverview(jwt.sub);
   }
 
   @Get('ateliers')
@@ -214,6 +258,14 @@ export class ParentController {
     @Body() body: Record<string, unknown>,
   ) {
     return this.parent.signDocument(jwt.sub, documentId, body);
+  }
+
+  @Get('children/:childId/reenrollment-prefill')
+  reenrollmentPrefill(
+    @ParentUser() jwt: ParentJwtPayload,
+    @Param('childId') childId: string,
+  ) {
+    return this.parent.getReenrollmentPrefill(jwt.sub, childId);
   }
 
   @Get('children/:childId')

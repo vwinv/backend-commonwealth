@@ -29,15 +29,43 @@ import { publishedDocumentsForParentWhere } from '../documents/document-audience
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { parseWizardData } from '../enrollments/enrollment-wizard.util';
 import {
   formatDateRangeLongFr,
   isoDateKey,
   workshopEnd,
 } from '../workshops/workshop-date.util';
 
+function dateToInput(d: Date | null | undefined): string {
+  if (!d) return '';
+  return d.toISOString().slice(0, 10);
+}
+
 function matriculeFromChildId(childId: string): string {
   const compact = childId.replace(/-/g, '').toUpperCase();
   return `MD${compact.slice(0, 6)}`;
+}
+
+function splitFullName(full: string | null | undefined): { firstName: string; lastName: string } {
+  const parts = String(full ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0) return { firstName: '', lastName: '' };
+  if (parts.length === 1) return { firstName: parts[0]!, lastName: '' };
+  return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1]! };
+}
+
+function genderToWizard(gender: Gender): 'Fille' | 'Garçon' {
+  return gender === Gender.MALE ? 'Garçon' : 'Fille';
+}
+
+function vaccinationDraftId(name: string): string {
+  const n = name.trim().toLowerCase();
+  if (n === 'bcg') return 'bcg';
+  if (n.startsWith('dtp')) return 'dtp1';
+  if (n === 'ror') return 'ror';
+  return n.replace(/\s+/g, '-');
 }
 
 function genderLabelFr(gender: Gender): string {
@@ -290,6 +318,110 @@ export class ParentService {
     });
     if (!child) throw new NotFoundException();
     return this.toChildResponse(child as ChildRow, childNumber);
+  }
+
+  async getReenrollmentPrefill(parentId: string, childId: string) {
+    const child = await this.prisma.child.findFirst({
+      where: { id: childId, parentId },
+      include: {
+        enrollments: {
+          orderBy: { createdAt: 'desc' },
+          include: { level: true },
+        },
+        healthRecord: { include: { vaccinations: { orderBy: { createdAt: 'asc' } } } },
+      },
+    });
+    if (!child) throw new NotFoundException();
+
+    const parentUser = await this.prisma.user.findUnique({
+      where: { id: parentId },
+      select: {
+        fullName: true,
+        email: true,
+        phone: true,
+        address: true,
+        parentRelation: true,
+      },
+    });
+
+    const lastEnrollment = child.enrollments[0] ?? null;
+    const wizard = parseWizardData(lastEnrollment?.wizardData);
+    const extras = wizard.childExtras ?? {};
+    const parentExtras = wizard.parentExtras ?? {};
+    const names = splitFullName(parentUser?.fullName);
+
+    const healthRecord = child.healthRecord;
+    const vaccinations = (healthRecord?.vaccinations ?? []).map((v) => ({
+      id: vaccinationDraftId(v.name),
+      label: v.name,
+      administeredAt: v.status === VaccinationStatus.DONE && v.vaccinatedAt ? dateToInput(v.vaccinatedAt) : '',
+    }));
+
+    return {
+      childId: child.id,
+      child: {
+        firstName: child.firstName,
+        lastName: child.lastName,
+        birthDate: dateToInput(child.birthDate),
+        birthPlace: extras.birthPlace ?? '',
+        nationality: extras.nationality ?? '',
+        gender: genderToWizard(child.gender),
+        homeLanguages: extras.homeLanguages ?? '',
+        matricule: extras.matricule || matriculeFromChildId(child.id),
+        levelId: lastEnrollment?.levelId ?? '',
+        levelName: extras.levelName ?? lastEnrollment?.level.name ?? '',
+        levelEmoji: '',
+        levelSubtitle: '',
+        childAddress: extras.childAddress || parentUser?.address?.trim() || '',
+        previousSchool: extras.previousSchool ?? '',
+      },
+      parent: {
+        fullName: parentUser?.fullName?.trim() || `${names.firstName} ${names.lastName}`.trim(),
+        firstName: names.firstName,
+        lastName: names.lastName,
+        relation: parentUser?.parentRelation === ParentRelation.FATHER || parentUser?.parentRelation === ParentRelation.MOTHER
+          ? parentUser.parentRelation
+          : lastEnrollment?.pendingParentRelation ?? '',
+        phone: parentUser?.phone?.trim() || lastEnrollment?.pendingParentPhone || '',
+        email: parentUser?.email?.trim() || lastEnrollment?.pendingParentEmail || '',
+        profession: parentExtras.profession ?? '',
+        address: parentUser?.address?.trim() || lastEnrollment?.pendingParentAddress || '',
+      },
+      guardian2: {
+        fullName: wizard.guardian2?.fullName ?? '',
+        relation: wizard.guardian2?.relation ?? '',
+        phone: wizard.guardian2?.phone ?? '',
+        email: wizard.guardian2?.email ?? '',
+      },
+      emergency: {
+        source: (wizard.emergency?.source as '' | 'GUARDIAN1' | 'GUARDIAN2' | 'OTHER' | undefined) ?? '',
+        fullName: wizard.emergency?.fullName ?? '',
+        relation: wizard.emergency?.relation ?? '',
+        phone: wizard.emergency?.phone ?? '',
+      },
+      health: {
+        doctorName: healthRecord?.doctorName ?? '',
+        doctorPhone: healthRecord?.doctorPhone ?? '',
+        bloodGroup: healthRecord?.bloodGroup ?? '',
+        knownAllergies: healthRecord?.knownAllergies || child.allergies || '',
+        ongoingTreatments: healthRecord?.ongoingTreatments ?? '',
+        dietaryRegime: healthRecord?.dietaryRegime ?? '',
+        instructions: healthRecord?.instructions ?? '',
+        vaccinations,
+      },
+      options: {
+        scheduleId: '',
+        scheduleLabel: '',
+        authorizations: {
+          photosInternal: wizard.options?.authorizations?.photosInternal ?? true,
+          photosCommunication: wizard.options?.authorizations?.photosCommunication ?? false,
+          outings: wizard.options?.authorizations?.outings ?? true,
+          firstAid: wizard.options?.authorizations?.firstAid ?? true,
+        },
+        serviceSelections: [],
+        comment: wizard.options?.comment ?? '',
+      },
+    };
   }
 
   async updateChild(parentId: string, childId: string, body: Record<string, unknown>) {
@@ -1235,7 +1367,7 @@ export class ParentService {
             status: enrollment.status,
             schoolYear: enrollment.schoolYear,
             levelName: enrollment.level.name,
-            className: enrollment.class?.name ?? enrollment.level.name,
+            className: enrollment.class?.name ?? '',
             headTeacher: enrollment.class?.headTeacher?.trim() || null,
             enrollmentDate: enrollment.createdAt.toISOString(),
             enrollmentDateDisplay: enrollment.createdAt.toLocaleDateString('fr-FR', {

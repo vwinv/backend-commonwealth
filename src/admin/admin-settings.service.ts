@@ -99,6 +99,120 @@ export class AdminSettingsService {
     });
   }
 
+  async getSchoolYearDeletionImpact(id: string) {
+    const existing = await this.prisma.schoolYear.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Année scolaire introuvable.');
+    return this.buildSchoolYearDeletionImpact(existing);
+  }
+
+  async deleteSchoolYear(id: string) {
+    const existing = await this.prisma.schoolYear.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Année scolaire introuvable.');
+    const label = existing.label;
+
+    try {
+      const result = await this.prisma.$transaction(
+        async (tx) => {
+          await tx.tuitionCharge.deleteMany({ where: { schoolYear: label } });
+          await tx.enrollment.deleteMany({ where: { schoolYear: label } });
+          await tx.programEvent.deleteMany({ where: { schoolYear: label } });
+          await tx.levelSchedule.deleteMany({ where: { schoolYear: label } });
+          await tx.levelSchoolYearPricing.deleteMany({ where: { schoolYear: label } });
+          await tx.serviceLevelPrice.deleteMany({ where: { schoolYear: label } });
+          await tx.schoolYear.delete({ where: { id } });
+
+          const remaining = await tx.schoolYear.findMany({
+            orderBy: { startDate: 'desc' },
+            select: { id: true, label: true, status: true },
+          });
+          const hasOpen = remaining.some((y) => y.status === SchoolYearStatus.OPEN);
+          let reopenedLabel: string | null = null;
+          if (!hasOpen && remaining[0]) {
+            await tx.schoolYear.update({
+              where: { id: remaining[0].id },
+              data: { status: SchoolYearStatus.OPEN },
+            });
+            reopenedLabel = remaining[0].label;
+          }
+          return { reopenedLabel, remainingLabel: remaining[0]?.label ?? null };
+        },
+        { timeout: 30000 },
+      );
+
+      return { ok: true, label, ...result };
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') {
+        throw new BadRequestException(
+          `Impossible de supprimer l’année ${label} : des données liées n’ont pas pu être retirées.`,
+        );
+      }
+      throw e;
+    }
+  }
+
+  private async buildSchoolYearDeletionImpact(existing: {
+    id: string;
+    label: string;
+    status: SchoolYearStatus;
+  }) {
+    const label = existing.label;
+    const [
+      remainingYears,
+      nextYear,
+      enrollments,
+      approvedEnrollments,
+      tuitionCharges,
+      monthlyInstallments,
+      monthlyPayments,
+      programEvents,
+      schedules,
+      pricings,
+      servicePrices,
+    ] = await Promise.all([
+      this.prisma.schoolYear.count({ where: { id: { not: existing.id } } }),
+      this.prisma.schoolYear.findFirst({
+        where: { id: { not: existing.id } },
+        orderBy: { startDate: 'desc' },
+        select: { label: true },
+      }),
+      this.prisma.enrollment.count({ where: { schoolYear: label } }),
+      this.prisma.enrollment.count({
+        where: { schoolYear: label, status: EnrollmentStatus.APPROVED },
+      }),
+      this.prisma.tuitionCharge.count({ where: { schoolYear: label } }),
+      this.prisma.monthlyInstallment.count({
+        where: { enrollment: { schoolYear: label } },
+      }),
+      this.prisma.monthlyPayment.count({
+        where: { enrollment: { schoolYear: label } },
+      }),
+      this.prisma.programEvent.count({ where: { schoolYear: label } }),
+      this.prisma.levelSchedule.count({ where: { schoolYear: label } }),
+      this.prisma.levelSchoolYearPricing.count({ where: { schoolYear: label } }),
+      this.prisma.serviceLevelPrice.count({ where: { schoolYear: label } }),
+    ]);
+
+    return {
+      id: existing.id,
+      label,
+      status: existing.status,
+      remainingYears,
+      willReopenLabel:
+        existing.status === SchoolYearStatus.OPEN && remainingYears > 0
+          ? (nextYear?.label ?? null)
+          : null,
+      enrollments,
+      approvedEnrollments,
+      tuitionCharges,
+      monthlyInstallments,
+      monthlyPayments,
+      programEvents,
+      schedules,
+      pricings,
+      servicePrices,
+    };
+  }
+
   async ensureSchoolYearExists(schoolYear: string) {
     const sy = schoolYear.trim();
     const row = await this.prisma.schoolYear.findUnique({ where: { label: sy } });
@@ -150,12 +264,22 @@ export class AdminSettingsService {
       countRows.filter((r) => r.classId).map((r) => [r.classId as string, r._count._all]),
     );
 
+    const levelEnrollmentRows =
+      levels.length > 0
+        ? await this.prisma.enrollment.groupBy({
+            by: ['levelId'],
+            _count: { _all: true },
+          })
+        : [];
+    const enrollmentsByLevel = new Map(levelEnrollmentRows.map((r) => [r.levelId, r._count._all]));
+
     return {
       schoolYear: sy,
       levels: levels.map((l) => ({
         id: l.id,
         name: l.name,
         order: l.order,
+        enrollmentCount: enrollmentsByLevel.get(l.id) ?? 0,
         classes: l.classes.map((c) => ({
           id: c.id,
           name: c.name,
@@ -344,6 +468,47 @@ export class AdminSettingsService {
       }
       throw e;
     }
+  }
+
+  async deleteLevel(levelId: string) {
+    const existing = await this.prisma.level.findUnique({
+      where: { id: levelId },
+      select: { id: true, name: true },
+    });
+    if (!existing) throw new NotFoundException('Niveau introuvable.');
+
+    const enrollmentCount = await this.prisma.enrollment.count({ where: { levelId } });
+    if (enrollmentCount > 0) {
+      throw new BadRequestException(
+        enrollmentCount === 1
+          ? `Impossible de supprimer « ${existing.name} » : 1 dossier d’inscription y est encore rattaché.`
+          : `Impossible de supprimer « ${existing.name} » : ${enrollmentCount} dossiers d’inscription y sont encore rattachés.`,
+      );
+    }
+
+    const classWithPupils = await this.prisma.classRoom.count({
+      where: { levelId, enrollments: { some: {} } },
+    });
+    if (classWithPupils > 0) {
+      throw new BadRequestException(
+        'Impossible de supprimer ce niveau : une classe contient encore des inscriptions.',
+      );
+    }
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.classRoom.deleteMany({ where: { levelId } });
+        await tx.level.delete({ where: { id: levelId } });
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') {
+        throw new BadRequestException(
+          `Impossible de supprimer « ${existing.name} » : des données y sont encore liées.`,
+        );
+      }
+      throw e;
+    }
+    return { ok: true };
   }
 
   private async persistLevelSchedules(

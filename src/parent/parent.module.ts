@@ -5,12 +5,13 @@ import { MailModule } from '../mail/mail.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { AdminModule } from '../admin/admin.module';
 import { ParentController } from './parent.controller';
 import { ParentInvoicePdfService } from './parent-invoice-pdf.service';
 import { ParentService } from './parent.service';
 
 @Module({
-  imports: [AuthModule, PrismaModule, BillingModule, PaymentsModule, NotificationsModule, MailModule],
+  imports: [AuthModule, PrismaModule, BillingModule, PaymentsModule, NotificationsModule, MailModule, AdminModule],
   controllers: [ParentController],
   providers: [ParentService, ParentInvoicePdfService],
 })

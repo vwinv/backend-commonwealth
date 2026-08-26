@@ -6,12 +6,17 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PaymentStatus, type ParentRelation } from '@prisma/client';
+import { PaymentStatus, ProgramEventStatus, type ParentRelation } from '@prisma/client';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer';
 import { PrismaService } from '../prisma/prisma.service';
 import { readSchoolContact } from '../config/school-contact';
+import { AdminProgrammeService } from '../admin/admin-programme.service';
+import {
+  buildParentProgrammeHtml,
+  type ParentProgrammePdfGroup,
+} from './parent-programme-html';
 import {
   buildParentInvoiceHtml,
   formatXofFromCents,
@@ -53,17 +58,86 @@ export class ParentInvoicePdfService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly programme: AdminProgrammeService,
   ) {}
 
   private branding() {
     const c = readSchoolContact(this.config);
     return {
       schoolDisplayName: c.displayName,
+      address: c.address,
       contactEmail: c.contactEmail,
       emergencyPhone: c.emergencyPhone,
       administrationEmail: c.administrationEmail,
       paymentModesLine: c.paymentModes,
     };
+  }
+
+  async programmePdf(
+    userId: string,
+    categoryId?: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const overview = await this.programme.getParentOverview(userId);
+    const cat = String(categoryId ?? '').trim();
+    const filterActive = Boolean(cat && cat !== 'ALL');
+    const items = filterActive
+      ? overview.items.filter((item) => item.categoryId === cat)
+      : overview.items;
+
+    let upcoming = 0;
+    let inProgress = 0;
+    let completed = 0;
+    const groupsMap = new Map<string, typeof items>();
+    for (const item of items) {
+      if (item.status === ProgramEventStatus.PLANNED) upcoming++;
+      else if (item.status === ProgramEventStatus.IN_PROGRESS) inProgress++;
+      else completed++;
+      const list = groupsMap.get(item.monthKey) ?? [];
+      list.push(item);
+      groupsMap.set(item.monthKey, list);
+    }
+    const groups: ParentProgrammePdfGroup[] = [...groupsMap.entries()].map(([monthLabel, events]) => ({
+      monthLabel,
+      events: events.map((e) => ({
+        title: e.title,
+        description: e.description,
+        dateLabel: e.dateLabel,
+        dayNum: e.dayNum,
+        dayAbbr: e.dayAbbr,
+        location: e.location,
+        assignedStaff: e.assignedStaff,
+        categoryLabel: e.categoryLabel,
+        categoryColor: e.categoryColor,
+        categoryBgColor: e.categoryBgColor,
+        status: e.status,
+        statusLabel: e.statusLabel,
+        levelLabels: e.levelLabels,
+      })),
+    }));
+
+    const filterLabel = filterActive
+      ? overview.categories.find((c) => c.id === cat)?.name ?? null
+      : null;
+
+    const b = this.branding();
+    const html = buildParentProgrammeHtml({
+      schoolDisplayName: b.schoolDisplayName,
+      headerSubline: `${b.address} · ${b.contactEmail} · ${b.emergencyPhone}`,
+      logoDataUri: this.getLogoDataUri(),
+      schoolYear: overview.schoolYear,
+      generatedDateFr: this.issueDateFr(),
+      filterLabel,
+      stats: {
+        total: items.length,
+        upcoming,
+        inProgress,
+        completed,
+      },
+      groups,
+    });
+    const buffer = await this.htmlToPdfBuffer(html);
+    const filename = this.safeFilename(`Programme-${overview.schoolYear}.pdf`);
+    return { buffer, filename };
   }
 
   /** Nest copie `src/mail/assets` vers `dist/mail/assets` ; le JS compilé est sous `dist/src/parent/`. */

@@ -4,6 +4,7 @@ import { EnrollmentStatus, Gender, ParentRelation, Prisma, SchoolYearStatus, Use
 import * as bcrypt from 'bcrypt';
 import { generateTempPassword } from '../auth/temp-password';
 import { BillingService } from '../billing/billing.service';
+import { inscriptionResumeUrl } from '../config/public-urls';
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -214,6 +215,35 @@ export class EnrollmentsService {
     return Boolean(user?.role === UserRole.PARENT && user.passwordHash);
   }
 
+  private async assertNoUnpaidClosedYearDebts(childId: string) {
+    const closedYears = await this.prisma.schoolYear.findMany({
+      where: { status: SchoolYearStatus.CLOSED },
+      select: { label: true },
+    });
+    const closedLabels = closedYears.map((y) => y.label);
+    if (!closedLabels.length) return;
+
+    const [unpaidTuition, unpaidMonthly] = await Promise.all([
+      this.prisma.tuitionCharge.count({
+        where: {
+          status: { not: 'PAID' },
+          enrollment: { childId, schoolYear: { in: closedLabels } },
+        },
+      }),
+      this.prisma.monthlyInstallment.count({
+        where: {
+          status: { not: 'PAID' },
+          enrollment: { childId, schoolYear: { in: closedLabels } },
+        },
+      }),
+    ]);
+    if (unpaidTuition > 0 || unpaidMonthly > 0) {
+      throw new BadRequestException(
+        'Réinscription impossible : toutes les factures des années clôturées doivent être réglées.',
+      );
+    }
+  }
+
   async createPublicEnrollment(input: any) {
     const parentEmail = String(input?.parent?.email ?? '').trim().toLowerCase();
     if (!parentEmail) throw new BadRequestException('parent.email is required');
@@ -387,6 +417,10 @@ export class EnrollmentsService {
       input?.existingParentAccount === true,
     );
 
+    if (childIdIn && !enrollmentIdIn) {
+      await this.assertNoUnpaidClosedYearDebts(childIdIn);
+    }
+
     if (childIdIn && enrollmentIdIn) {
       const prior = await this.prisma.enrollment.findFirst({
         where: { id: enrollmentIdIn, childId: childIdIn, status: EnrollmentStatus.PENDING },
@@ -456,6 +490,56 @@ export class EnrollmentsService {
             ...pendingParentData,
           },
         });
+      } else if (childIdIn) {
+        const owned = await tx.child.findFirst({
+          where: { id: childIdIn, parentId },
+          select: { id: true },
+        });
+        if (!owned) {
+          throw new BadRequestException('Enfant introuvable.');
+        }
+        const approvedSameYear = await tx.enrollment.findFirst({
+          where: { childId: childIdIn, schoolYear, status: EnrollmentStatus.APPROVED },
+          select: { id: true },
+        });
+        if (approvedSameYear) {
+          throw new BadRequestException('Cet enfant est déjà inscrit pour cette année scolaire.');
+        }
+        child = await tx.child.update({
+          where: { id: childIdIn },
+          data: { ...childData, parentId },
+        });
+        const pendingSameYear = await tx.enrollment.findFirst({
+          where: { childId: childIdIn, schoolYear, status: EnrollmentStatus.PENDING },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (pendingSameYear) {
+          const resumeToken = pendingSameYear.resumeToken ?? generateResumeToken();
+          enrollment = await tx.enrollment.update({
+            where: { id: pendingSameYear.id },
+            data: {
+              levelId,
+              wizardStep: 3,
+              wizardData: wizardData as Prisma.InputJsonValue,
+              resumeToken,
+              ...pendingParentData,
+            },
+          });
+        } else {
+          const resumeToken = generateResumeToken();
+          enrollment = await tx.enrollment.create({
+            data: {
+              childId: child.id,
+              levelId,
+              schoolYear,
+              status: EnrollmentStatus.PENDING,
+              wizardStep: 3,
+              wizardData: wizardData as Prisma.InputJsonValue,
+              resumeToken,
+              ...pendingParentData,
+            },
+          });
+        }
       } else {
         const existing = await tx.enrollment.findFirst({
           where: {
@@ -654,15 +738,7 @@ export class EnrollmentsService {
   }
 
   private inscriptionResumeUrl(resumeToken: string): string {
-    const explicit = this.config.get<string>('PUBLIC_INSCRIPTION_URL')?.trim();
-    if (explicit) {
-      return `${explicit.replace(/\/$/, '')}?resume=${encodeURIComponent(resumeToken)}`;
-    }
-    const login =
-      this.config.get<string>('PARENT_PORTAL_LOGIN_URL')?.trim() ||
-      'http://localhost:3000/parent/login';
-    const site = login.replace(/\/parent\/login\/?$/i, '') || 'http://localhost:3000';
-    return `${site.replace(/\/$/, '')}/inscription?resume=${encodeURIComponent(resumeToken)}`;
+    return inscriptionResumeUrl(this.config, resumeToken);
   }
 
   /**

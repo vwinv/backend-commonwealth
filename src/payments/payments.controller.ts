@@ -1,12 +1,19 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { AppModuleRole } from '@prisma/client';
+import { AdminJwtGuard } from '../auth/admin-jwt.guard';
+import { AdminMustChangePasswordGuard } from '../auth/admin-must-change-password.guard';
+import { AdminPermissionGuard } from '../auth/admin-permission.guard';
+import { RequireAppModule } from '../auth/require-app-module.decorator';
 import { PaymentsService } from './payments.service';
 
 @Controller('backoffice')
+@UseGuards(AdminJwtGuard, AdminMustChangePasswordGuard, AdminPermissionGuard)
+@RequireAppModule(AppModuleRole.FINANCE)
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
 
   @Post('payments')
-  recordPayment(@Body() body: any) {
+  recordPayment(@Body() body: Record<string, unknown>) {
     return this.payments.recordPayment(body);
   }
 
@@ -14,23 +21,4 @@ export class PaymentsController {
   listEnrollmentPayments(@Param('enrollmentId') enrollmentId: string) {
     return this.payments.listEnrollmentPayments(enrollmentId);
   }
-
-  @Post('paydunya/checkout-invoice')
-  createPaydunyaCheckoutInvoice(@Body() body: Record<string, unknown>) {
-    return this.payments.createPaydunyaCheckoutInvoice(body);
-  }
-
-  @Post('paydunya/softpay/:provider')
-  triggerPaydunyaSoftpay(
-    @Param('provider') provider: string,
-    @Body() body: Record<string, unknown>,
-  ) {
-    return this.payments.triggerPaydunyaSoftpay(provider, body);
-  }
-
-  @Get('paydunya/checkout-invoice/:token/status')
-  verifyPaydunyaCheckoutStatus(@Param('token') token: string) {
-    return this.payments.verifyPaydunyaCheckoutStatus(token);
-  }
 }
-

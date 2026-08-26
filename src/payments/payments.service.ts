@@ -1,12 +1,29 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { EnrollmentStatus, PaymentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+
+type SoftPayChannel = 'wave' | 'orange_money' | 'wizall' | 'mtn_money' | 'moov_money';
+type PayableKind = 'TUITION' | 'MONTHLY_INSTALLMENT' | 'LEGACY';
+type PayableBill = {
+  kind: PayableKind;
+  billId: string;
+  childId: string;
+  enrollmentId: string;
+  amountCents: number;
+  label: string;
+  schoolYear?: string;
+  year?: number;
+  month?: number;
+};
 
 @Injectable()
 export class PaymentsService {
@@ -202,6 +219,623 @@ export class PaymentsService {
     });
   }
 
+  private centsToXof(cents: number): number {
+    const n = Number(cents);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.round(n / 100);
+  }
+
+  private isMonthlyInvoiceVisible(year: number, month: number, now = new Date()): boolean {
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1;
+    if (year < currentYear || (year === currentYear && month < currentMonth)) return true;
+    if (year > currentYear || month > currentMonth) return false;
+    const lastDay = new Date(year, month, 0).getDate();
+    const thresholdDay = Math.max(1, lastDay - 9);
+    return now.getDate() >= thresholdDay;
+  }
+
+  private periodKeyFromSchoolYear(schoolYear: string): number {
+    const m = schoolYear.trim().match(/^(\d{4})-/);
+    return m ? parseInt(m[1]!, 10) * 100 + 9 : 0;
+  }
+
+  extractPaydunyaCheckoutToken(checkout: Record<string, unknown>): string {
+    const data = checkout?.data as Record<string, unknown> | undefined;
+    const direct = String(checkout?.token ?? data?.token ?? '').trim();
+    if (direct) return direct;
+    const rt = checkout?.response_text ?? data?.response_text;
+    if (typeof rt === 'object' && rt != null) {
+      const o = rt as Record<string, unknown>;
+      const nested = String(o.token ?? o.checkout_invoice_token ?? '').trim();
+      if (nested) return nested;
+    }
+    if (typeof rt === 'string') {
+      const m = rt.trim().match(/\/invoice\/([^/?#]+)/i);
+      if (m?.[1]) return m[1].trim();
+    }
+    return '';
+  }
+
+  isPaydunyaCheckoutPaid(verify: Record<string, unknown>): boolean {
+    const data = verify?.data as Record<string, unknown> | undefined;
+    const inv = (data?.invoice ?? verify?.invoice) as Record<string, unknown> | undefined;
+    const invStatus = String(inv?.status ?? '').toLowerCase();
+    if (invStatus === 'completed' || invStatus === 'paid') return true;
+    const rt = verify?.response_text;
+    const rtObj = typeof rt === 'object' && rt != null ? (rt as Record<string, unknown>) : null;
+    const statusRaw = String(
+      verify?.status ??
+        rtObj?.status ??
+        rtObj?.payment_status ??
+        data?.status ??
+        '',
+    ).toLowerCase();
+    return (
+      statusRaw.includes('completed') ||
+      statusRaw.includes('paid') ||
+      statusRaw.includes('successfully paid')
+    );
+  }
+
+  private extractCustomData(verify: Record<string, unknown>): Record<string, string> {
+    const data = verify?.data as Record<string, unknown> | undefined;
+    const raw = (verify?.custom_data ?? data?.custom_data ?? {}) as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw ?? {})) {
+      if (v == null) continue;
+      out[k] = String(v).trim();
+    }
+    return out;
+  }
+
+  private paydunyaInvoiceTotalXof(verify: Record<string, unknown>): number | null {
+    const data = verify?.data as Record<string, unknown> | undefined;
+    const inv = (data?.invoice ?? verify?.invoice) as Record<string, unknown> | undefined;
+    const raw = inv?.total_amount ?? verify?.total_amount ?? data?.total_amount;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  private safeEqualHex(expectedHex: string, received: string): boolean {
+    const a = Buffer.from(expectedHex, 'utf8');
+    const b = Buffer.from(String(received).trim(), 'utf8');
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+
+  private channelToSoftpayProvider(channel: SoftPayChannel, dial: '+221' | '+225'): string {
+    if (channel === 'wave') return dial === '+225' ? 'wave_ci' : 'wave_sn';
+    if (channel === 'orange_money') return dial === '+225' ? 'orange_ci' : 'orange_sn';
+    if (channel === 'wizall') {
+      if (dial !== '+221') throw new BadRequestException('Wizall n’est disponible qu’au Sénégal.');
+      return 'wizall_sn';
+    }
+    if (channel === 'mtn_money') {
+      if (dial !== '+225') throw new BadRequestException('MTN Money n’est disponible qu’en Côte d’Ivoire.');
+      return 'mtn_ci';
+    }
+    if (channel === 'moov_money') {
+      if (dial !== '+225') throw new BadRequestException('Moov Money n’est disponible qu’en Côte d’Ivoire.');
+      return 'moov_ci';
+    }
+    throw new BadRequestException('Moyen de paiement non supporté en ligne.');
+  }
+
+  private buildSoftpayPayload(
+    provider: string,
+    token: string,
+    opts: { fullName: string; email: string; phoneLocalDigits: string; orangeOtp?: string },
+  ): Record<string, unknown> {
+    const fn = opts.fullName.trim() || 'Parent';
+    const email = opts.email.trim() || 'parent@commonwealth-school.local';
+    const local = opts.phoneLocalDigits.replace(/\D/g, '');
+
+    switch (provider) {
+      case 'wave_sn':
+        return {
+          wave_senegal_fullName: fn,
+          wave_senegal_email: email,
+          wave_senegal_phone: local,
+          wave_senegal_payment_token: token,
+        };
+      case 'wave_ci':
+        return {
+          wave_ci_fullName: fn,
+          wave_ci_email: email,
+          wave_ci_phone: local,
+          wave_ci_payment_token: token,
+        };
+      case 'orange_sn':
+        return {
+          customer_name: fn,
+          customer_email: email,
+          phone_number: local,
+          invoice_token: token,
+        };
+      case 'orange_ci':
+        return {
+          orange_money_ci_customer_fullname: fn,
+          orange_money_ci_email: email,
+          orange_money_ci_phone_number: local.startsWith('0') ? local : `0${local}`,
+          orange_money_ci_otp: String(opts.orangeOtp ?? '').trim(),
+          payment_token: token,
+        };
+      case 'wizall_sn':
+        return {
+          customer_name: fn,
+          customer_email: email,
+          phone_number: local,
+          invoice_token: token,
+        };
+      case 'mtn_ci':
+        return {
+          mtn_ci_customer_fullname: fn,
+          mtn_ci_email: email,
+          mtn_ci_phone_number: local,
+          mtn_ci_wallet_provider: 'MTNCI',
+          payment_token: token,
+        };
+      case 'moov_ci':
+        return {
+          moov_ci_customer_fullname: fn,
+          moov_ci_email: email,
+          moov_ci_phone_number: local,
+          payment_token: token,
+        };
+      default:
+        return { payment_token: token, invoice_token: token };
+    }
+  }
+
+  private extractSoftpayRedirectUrl(soft: Record<string, unknown>): string {
+    const other = (soft.other_url ?? (soft.data as Record<string, unknown> | undefined)?.other_url) as
+      | Record<string, unknown>
+      | undefined;
+    const candidates = [
+      soft.url,
+      (soft.data as Record<string, unknown> | undefined)?.url,
+      other?.om_url,
+      other?.maxit_url,
+    ];
+    for (const c of candidates) {
+      const s = String(c ?? '').trim();
+      if (s.startsWith('http')) return s;
+    }
+    return '';
+  }
+
+  private extractWizallTransactionId(soft: Record<string, unknown>): string {
+    const data = soft.data as Record<string, unknown> | undefined;
+    return String(data?.TransactionID ?? soft.TransactionID ?? data?.transaction_id ?? '').trim();
+  }
+
+  private parseDial(raw: unknown): '+221' | '+225' {
+    const s = String(raw ?? '').trim();
+    if (s === '+225' || s.startsWith('+225') || s.startsWith('225')) return '+225';
+    return '+221';
+  }
+
+  private parseChannel(raw: unknown): SoftPayChannel {
+    const channel = String(raw ?? '').trim().toLowerCase();
+    const allowed: SoftPayChannel[] = ['wave', 'orange_money', 'wizall', 'mtn_money', 'moov_money'];
+    if (!allowed.includes(channel as SoftPayChannel)) {
+      throw new BadRequestException('Moyen de paiement non reconnu.');
+    }
+    return channel as SoftPayChannel;
+  }
+
+  async resolveNextPayableBill(parentUserId: string, childIds: string[]): Promise<PayableBill> {
+    const ids = [...new Set(childIds.map((x) => String(x ?? '').trim()).filter(Boolean))];
+    const children = await this.prisma.child.findMany({
+      where: {
+        parentId: parentUserId,
+        ...(ids.length ? { id: { in: ids } } : {}),
+      },
+      include: {
+        enrollments: {
+          where: { status: EnrollmentStatus.APPROVED },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+    if (!children.length) {
+      throw new BadRequestException('Aucun élève autorisé pour ce paiement.');
+    }
+
+    const enrollmentIds = children
+      .map((c) => c.enrollments[0]?.id)
+      .filter((id): id is string => Boolean(id));
+    if (!enrollmentIds.length) {
+      throw new BadRequestException('Aucune inscription validée pour le paiement.');
+    }
+
+    const tuitions = await this.prisma.tuitionCharge.findMany({
+      where: {
+        enrollmentId: { in: enrollmentIds },
+        status: PaymentStatus.PENDING,
+        amountCents: { gt: 0 },
+      },
+      include: { enrollment: { select: { childId: true } } },
+    });
+    tuitions.sort(
+      (a, b) => this.periodKeyFromSchoolYear(a.schoolYear) - this.periodKeyFromSchoolYear(b.schoolYear),
+    );
+    const tuition = tuitions[0];
+    if (tuition) {
+      return {
+        kind: 'TUITION',
+        billId: tuition.id,
+        childId: tuition.enrollment.childId,
+        enrollmentId: tuition.enrollmentId,
+        amountCents: tuition.amountCents,
+        label: `Scolarité ${tuition.schoolYear}`,
+        schoolYear: tuition.schoolYear,
+      };
+    }
+
+    const monthlies = await this.prisma.monthlyInstallment.findMany({
+      where: {
+        enrollmentId: { in: enrollmentIds },
+        status: PaymentStatus.PENDING,
+        totalAmountCents: { gt: 0 },
+      },
+      include: { enrollment: { select: { childId: true } } },
+      orderBy: [{ year: 'asc' }, { month: 'asc' }],
+    });
+    const monthly = monthlies.find((m) => this.isMonthlyInvoiceVisible(m.year, m.month));
+    if (monthly) {
+      const tuitionStillDue = await this.hasPendingTuitionAnywhereForParent(parentUserId);
+      if (tuitionStillDue) {
+        throw new BadRequestException(
+          'Réglez la scolarité annuelle pour tous les enfants avant de payer les mensualités.',
+        );
+      }
+      return {
+        kind: 'MONTHLY_INSTALLMENT',
+        billId: monthly.id,
+        childId: monthly.enrollment.childId,
+        enrollmentId: monthly.enrollmentId,
+        amountCents: monthly.totalAmountCents,
+        label: `Mensualité ${String(monthly.month).padStart(2, '0')}/${monthly.year}`,
+        year: monthly.year,
+        month: monthly.month,
+      };
+    }
+
+    const legacies = await this.prisma.monthlyPayment.findMany({
+      where: {
+        enrollmentId: { in: enrollmentIds },
+        status: PaymentStatus.PENDING,
+        amountCents: { gt: 0 },
+      },
+      include: { enrollment: { select: { childId: true } } },
+      orderBy: [{ year: 'asc' }, { month: 'asc' }],
+    });
+    const legacy = legacies[0];
+    if (legacy) {
+      return {
+        kind: 'LEGACY',
+        billId: legacy.id,
+        childId: legacy.enrollment.childId,
+        enrollmentId: legacy.enrollmentId,
+        amountCents: legacy.amountCents,
+        label: `Mensualité ${String(legacy.month).padStart(2, '0')}/${legacy.year}`,
+        year: legacy.year,
+        month: legacy.month,
+      };
+    }
+
+    throw new BadRequestException('Aucune facture impayée disponible pour paiement.');
+  }
+
+  async createParentCheckout(parentUserId: string, body: Record<string, unknown>) {
+    const channel = this.parseChannel(body?.channel);
+    const rawIds = body?.childIds;
+    const childIds = Array.isArray(rawIds) ? rawIds.map((x) => String(x ?? '')) : [];
+    const bill = await this.resolveNextPayableBill(parentUserId, childIds);
+    const amountXof = this.centsToXof(bill.amountCents);
+    if (amountXof <= 0) throw new BadRequestException('Montant de facture invalide.');
+
+    const description = String(body?.description ?? '').trim() || `Commonwealth — ${bill.label}`;
+    const created = (await this.createPaydunyaCheckoutInvoice({
+      total_amount: amountXof,
+      description,
+      items: {
+        item_0: {
+          name: bill.label,
+          quantity: '1',
+          unit_price: String(amountXof),
+          total_price: String(amountXof),
+        },
+      },
+      custom_data: {
+        parentId: parentUserId,
+        childId: bill.childId,
+        enrollmentId: bill.enrollmentId,
+        billKind: bill.kind,
+        billId: bill.billId,
+        channel,
+        amountCents: String(bill.amountCents),
+        schoolYear: bill.schoolYear ?? '',
+        year: bill.year != null ? String(bill.year) : '',
+        month: bill.month != null ? String(bill.month) : '',
+      },
+    })) as Record<string, unknown>;
+
+    const token = this.extractPaydunyaCheckoutToken(created);
+    if (!token) {
+      throw new BadGatewayException('PayDunya n’a pas renvoyé de token de paiement.');
+    }
+    return { token, amountXof, description, billKind: bill.kind, billId: bill.billId };
+  }
+
+  async triggerParentSoftpay(parentUserId: string, body: Record<string, unknown>) {
+    const token = String(body?.checkoutToken ?? body?.token ?? '').trim();
+    if (!token) throw new BadRequestException('Token de paiement manquant.');
+
+    const verify = (await this.verifyPaydunyaCheckoutStatus(token)) as Record<string, unknown>;
+    const custom = this.extractCustomData(verify);
+    if (custom.parentId && custom.parentId !== parentUserId) {
+      throw new ForbiddenException();
+    }
+    if (this.isPaydunyaCheckoutPaid(verify)) {
+      return { success: true, paid: true, message: 'Paiement déjà confirmé.', redirectUrl: '', wizallTransactionId: '' };
+    }
+
+    const channel = this.parseChannel(body?.channel ?? custom.channel);
+    const dial = this.parseDial(body?.country ?? body?.phoneCountry);
+    const firstName = String(body?.firstName ?? '').trim();
+    const lastName = String(body?.lastName ?? '').trim();
+    const fullName = `${firstName} ${lastName}`.trim();
+    const email = String(body?.email ?? '').trim();
+    const phoneLocal = String(body?.phoneLocal ?? '').replace(/\D/g, '');
+    const wizallCode = String(body?.wizallAuthorizationCode ?? body?.wizallOtp ?? '').trim();
+    const wizallTxn = String(body?.wizallTransactionId ?? '').trim();
+
+    if (channel === 'wizall' && wizallCode && wizallTxn) {
+      const confirmed = (await this.callPaydunya('/softpay/wizall-money-senegal/confirm', {
+        method: 'POST',
+        headers: this.paydunyaHeaders(),
+        body: JSON.stringify({
+          authorization_code: wizallCode,
+          phone_number: phoneLocal,
+          transaction_id: wizallTxn,
+        }),
+      })) as Record<string, unknown>;
+      const ok = confirmed.success !== false;
+      if (!ok) {
+        throw new BadGatewayException(
+          String(confirmed.message ?? this.paydunyaPrimaryMessage(confirmed) ?? 'Confirmation Wizall refusée.'),
+        );
+      }
+      return {
+        success: true,
+        paid: false,
+        message: String(confirmed.message ?? 'Paiement Wizall en cours de confirmation.'),
+        redirectUrl: '',
+        wizallTransactionId: wizallTxn,
+      };
+    }
+
+    const provider = this.channelToSoftpayProvider(channel, dial);
+    if (provider === 'orange_ci' && !String(body?.orangeOtp ?? '').trim()) {
+      throw new BadRequestException('Le code de paiement Orange Money CI est obligatoire.');
+    }
+
+    const payload = this.buildSoftpayPayload(provider, token, {
+      fullName,
+      email,
+      phoneLocalDigits: phoneLocal,
+      orangeOtp: String(body?.orangeOtp ?? '').trim(),
+    });
+    const soft = (await this.triggerPaydunyaSoftpay(provider, payload)) as Record<string, unknown>;
+    if (soft.success === false) {
+      throw new BadGatewayException(
+        String(soft.message ?? this.paydunyaPrimaryMessage(soft) ?? 'La demande de paiement a été refusée.'),
+      );
+    }
+
+    const redirectUrl = this.extractSoftpayRedirectUrl(soft);
+    const wizallTransactionId = this.extractWizallTransactionId(soft);
+    return {
+      success: true,
+      paid: false,
+      message: String(soft.message ?? 'Demande de paiement envoyée.'),
+      redirectUrl,
+      wizallTransactionId,
+      needsWizallOtp: channel === 'wizall' && Boolean(wizallTransactionId),
+    };
+  }
+
+  async getParentCheckoutStatus(parentUserId: string, token: string) {
+    const verify = (await this.verifyPaydunyaCheckoutStatus(token)) as Record<string, unknown>;
+    const custom = this.extractCustomData(verify);
+    if (custom.parentId && custom.parentId !== parentUserId) {
+      throw new ForbiddenException();
+    }
+    return { paid: this.isPaydunyaCheckoutPaid(verify), status: verify };
+  }
+
+  private async findPaymentByPaydunyaToken(token: string): Promise<{
+    kind: PayableKind;
+    childId: string;
+  } | null> {
+    const where = { transactionRef: { contains: token } };
+    const tuition = await this.prisma.tuitionCharge.findFirst({
+      where,
+      select: { enrollment: { select: { childId: true } } },
+    });
+    if (tuition) return { kind: 'TUITION', childId: tuition.enrollment.childId };
+    const monthly = await this.prisma.monthlyInstallment.findFirst({
+      where,
+      select: { enrollment: { select: { childId: true } } },
+    });
+    if (monthly) return { kind: 'MONTHLY_INSTALLMENT', childId: monthly.enrollment.childId };
+    const legacy = await this.prisma.monthlyPayment.findFirst({
+      where,
+      select: { enrollment: { select: { childId: true } } },
+    });
+    if (legacy) return { kind: 'LEGACY', childId: legacy.enrollment.childId };
+    return null;
+  }
+
+  async applyPaidCheckoutToken(token: string, expectedParentId?: string) {
+    const verify = (await this.verifyPaydunyaCheckoutStatus(token)) as Record<string, unknown>;
+    if (!this.isPaydunyaCheckoutPaid(verify)) {
+      throw new BadRequestException('Le paiement n’est pas encore confirmé par PayDunya.');
+    }
+    const custom = this.extractCustomData(verify);
+    if (expectedParentId && custom.parentId && custom.parentId !== expectedParentId) {
+      throw new ForbiddenException();
+    }
+    const parentUserId = expectedParentId || custom.parentId;
+    if (!parentUserId) {
+      throw new BadRequestException('Impossible d’associer ce paiement à un compte parent.');
+    }
+
+    const paidXof = this.paydunyaInvoiceTotalXof(verify);
+    const expectedCents = Number(custom.amountCents ?? 0);
+    if (paidXof != null && expectedCents > 0 && paidXof !== this.centsToXof(expectedCents)) {
+      this.logger.warn(
+        `PayDunya amount mismatch token=${token} paidXof=${paidXof} expectedCents=${expectedCents}`,
+      );
+      throw new BadRequestException('Le montant PayDunya ne correspond pas à la facture.');
+    }
+
+    const channel = String(custom.channel || 'online').toLowerCase();
+    const transactionRef = `PAYDUNYA-${channel.toUpperCase()}-${token}`;
+
+    const already = await this.findPaymentByPaydunyaToken(token);
+    if (already) {
+      return { ok: true, alreadyPaid: true, kind: already.kind, childId: already.childId };
+    }
+
+    let kind = String(custom.billKind || '').toUpperCase() as PayableKind;
+    let enrollmentId = custom.enrollmentId;
+    if (!enrollmentId || !kind) {
+      const fallback = await this.resolveNextPayableBill(parentUserId, custom.childId ? [custom.childId] : []);
+      if (paidXof != null && paidXof !== this.centsToXof(fallback.amountCents)) {
+        throw new BadRequestException('Le montant PayDunya ne correspond pas à la facture.');
+      }
+      kind = fallback.kind;
+      enrollmentId = fallback.enrollmentId;
+      custom.billId = fallback.billId;
+      custom.childId = fallback.childId;
+      custom.schoolYear = fallback.schoolYear ?? '';
+      custom.year = fallback.year != null ? String(fallback.year) : '';
+      custom.month = fallback.month != null ? String(fallback.month) : '';
+    }
+    if (!enrollmentId) throw new BadRequestException('Facture PayDunya incomplète (inscription manquante).');
+
+    if (kind === 'TUITION') {
+      const charge = custom.billId
+        ? await this.prisma.tuitionCharge.findFirst({
+            where: { id: custom.billId, enrollmentId, enrollment: { child: { parentId: parentUserId } } },
+          })
+        : await this.prisma.tuitionCharge.findFirst({
+            where: {
+              enrollmentId,
+              schoolYear: custom.schoolYear || undefined,
+              enrollment: { child: { parentId: parentUserId } },
+            },
+          });
+      if (!charge) throw new NotFoundException('Facture de scolarité introuvable.');
+      if (charge.status === PaymentStatus.PAID) {
+        return { ok: true, alreadyPaid: true, kind, childId: custom.childId };
+      }
+      await this.recordTuitionPayment({
+        enrollmentId,
+        schoolYear: charge.schoolYear,
+        amountCents: charge.amountCents,
+        transactionRef,
+      });
+      return { ok: true, kind, childId: custom.childId };
+    }
+
+    if (kind === 'MONTHLY_INSTALLMENT') {
+      const year = Number(custom.year);
+      const month = Number(custom.month);
+      const row = custom.billId
+        ? await this.prisma.monthlyInstallment.findFirst({
+            where: { id: custom.billId, enrollmentId, enrollment: { child: { parentId: parentUserId } } },
+          })
+        : await this.prisma.monthlyInstallment.findFirst({
+            where: { enrollmentId, year, month, enrollment: { child: { parentId: parentUserId } } },
+          });
+      if (!row) throw new NotFoundException('Mensualité introuvable.');
+      if (row.status === PaymentStatus.PAID) {
+        return { ok: true, alreadyPaid: true, kind, childId: custom.childId };
+      }
+      await this.recordMonthlyInstallmentPayment({
+        enrollmentId,
+        year: row.year,
+        month: row.month,
+        amountCents: row.totalAmountCents,
+        transactionRef,
+      });
+      return { ok: true, kind, childId: custom.childId };
+    }
+
+    if (kind === 'LEGACY') {
+      const year = Number(custom.year);
+      const month = Number(custom.month);
+      const row = custom.billId
+        ? await this.prisma.monthlyPayment.findFirst({
+            where: { id: custom.billId, enrollmentId, enrollment: { child: { parentId: parentUserId } } },
+          })
+        : null;
+      if (row?.status === PaymentStatus.PAID) {
+        return { ok: true, alreadyPaid: true, kind, childId: custom.childId };
+      }
+      await this.recordLegacyMonthlyPayment({
+        enrollmentId,
+        year: row?.year ?? year,
+        month: row?.month ?? month,
+        amountCents: row?.amountCents ?? expectedCents,
+        transactionRef,
+      });
+      return { ok: true, kind, childId: custom.childId };
+    }
+
+    throw new BadRequestException('Type de facture PayDunya inconnu.');
+  }
+
+  async handlePaydunyaIpn(body: Record<string, unknown>) {
+    const data = (
+      body?.data && typeof body.data === 'object' ? body.data : body
+    ) as Record<string, unknown>;
+    const hash = String(data.hash ?? body.hash ?? '').trim();
+    const master = String(process.env.PAYDUNYA_MASTER_KEY ?? '').trim();
+    if (hash && master) {
+      const expected = createHash('sha512').update(master).digest('hex');
+      if (!this.safeEqualHex(expected, hash)) {
+        this.logger.warn('PayDunya IPN: hash invalide');
+        throw new UnauthorizedException();
+      }
+    }
+    const invoice = (
+      data.invoice && typeof data.invoice === 'object' ? data.invoice : {}
+    ) as Record<string, unknown>;
+    const token = String(invoice.token ?? data.token ?? data.invoice_token ?? body.token ?? '').trim();
+    if (!token) {
+      this.logger.warn('PayDunya IPN: token manquant');
+      return { ok: true };
+    }
+    const status = String(data.status ?? invoice.status ?? '').toLowerCase();
+    if (status && status !== 'completed' && status !== 'paid') {
+      return { ok: true, ignored: status };
+    }
+    try {
+      await this.applyPaidCheckoutToken(token);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`PayDunya IPN apply failed token=${token}: ${msg}`);
+    }
+    return { ok: true };
+  }
+
   async recordPayment(input: any) {
     const kind = String(input?.kind ?? 'LEGACY').toUpperCase();
     if (kind === 'TUITION') return this.recordTuitionPayment(input);
@@ -372,8 +1006,7 @@ export class PaymentsService {
   }
 
   /**
-   * Espace parent : enregistre le paiement pour chaque enfant sélectionné (scolarité annuelle en priorité,
-   * sinon prochaine mensualité impayée). À appeler après confirmation côté passerelle (ou en simulation).
+   * Espace parent : enregistre la facture après confirmation PayDunya (token obligatoire).
    */
   async completeParentSchoolFees(
     parentUserId: string,
@@ -385,136 +1018,32 @@ export class PaymentsService {
     results: Array<{
       childId: string;
       ok: boolean;
-      kind?: 'TUITION' | 'MONTHLY_INSTALLMENT';
+      kind?: PayableKind;
       message?: string;
     }>;
   }> {
-    const rawIds = body?.childIds;
-    const childIds = Array.isArray(rawIds)
-      ? [...new Set(rawIds.map((x) => String(x ?? '').trim()).filter(Boolean))]
-      : [];
+    const checkoutToken = String(body?.checkoutToken ?? body?.token ?? '').trim();
+    if (!checkoutToken) {
+      throw new BadRequestException(
+        'Le paiement n’a pas été confirmé par PayDunya. Validez d’abord sur Wave / Orange Money.',
+      );
+    }
+
+    const applied = await this.applyPaidCheckoutToken(checkoutToken, parentUserId);
     const phone = String(body?.phone ?? '').trim();
-    const channel = String(body?.channel ?? '').trim().toLowerCase();
-
-    if (!childIds.length) {
-      throw new BadRequestException('Sélectionnez au moins un élève.');
-    }
-    if (!phone) {
-      throw new BadRequestException('Le numéro de téléphone est obligatoire.');
-    }
-    if (!channel) {
-      throw new BadRequestException('Le moyen de paiement est obligatoire.');
-    }
-
-    const allowed = new Set(['wave', 'orange_money', 'wizall', 'western_union', 'mtn_money', 'moov_money']);
-    if (!allowed.has(channel)) {
-      throw new BadRequestException('Moyen de paiement non reconnu.');
-    }
-
-    const refPrefix = `SIM-${channel.toUpperCase()}-${Date.now()}`;
-    const results: Array<{
-      childId: string;
-      ok: boolean;
-      kind?: 'TUITION' | 'MONTHLY_INSTALLMENT';
-      message?: string;
-    }> = [];
-
-    for (const childId of childIds) {
-      const child = await this.prisma.child.findFirst({
-        where: { id: childId, parentId: parentUserId },
-        include: {
-          enrollments: {
-            where: { status: EnrollmentStatus.APPROVED },
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-          },
-        },
-      });
-
-      if (!child) {
-        results.push({ childId, ok: false, message: 'Élève introuvable ou non autorisé.' });
-        continue;
-      }
-
-      const enrollment = child.enrollments[0];
-      if (!enrollment) {
-        results.push({ childId, ok: false, message: 'Aucune inscription validée pour cet élève.' });
-        continue;
-      }
-
-      const tuition = await this.prisma.tuitionCharge.findFirst({
-        where: { enrollmentId: enrollment.id, status: PaymentStatus.PENDING },
-        orderBy: { schoolYear: 'desc' },
-      });
-
-      if (tuition && tuition.amountCents > 0) {
-        const transactionRef = `${refPrefix}-${childId.slice(0, 8)}-T`;
-        try {
-          await this.recordTuitionPayment({
-            enrollmentId: enrollment.id,
-            schoolYear: tuition.schoolYear,
-            amountCents: tuition.amountCents,
-            transactionRef,
-          });
-          results.push({ childId, ok: true, kind: 'TUITION' });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          results.push({ childId, ok: false, message: msg });
-        }
-        continue;
-      }
-
-      const monthly = await this.prisma.monthlyInstallment.findFirst({
-        where: { enrollmentId: enrollment.id, status: PaymentStatus.PENDING },
-        orderBy: [{ year: 'asc' }, { month: 'asc' }],
-      });
-
-      if (monthly && monthly.totalAmountCents > 0) {
-        const tuitionStillDueSomewhere = await this.hasPendingTuitionAnywhereForParent(parentUserId);
-        if (tuitionStillDueSomewhere) {
-          results.push({
-            childId,
-            ok: false,
-            message:
-              'Réglez la scolarité annuelle pour tous les enfants avant de payer les mensualités.',
-          });
-          continue;
-        }
-        const transactionRef = `${refPrefix}-${childId.slice(0, 8)}-M`;
-        try {
-          await this.recordMonthlyInstallmentPayment({
-            enrollmentId: enrollment.id,
-            year: monthly.year,
-            month: monthly.month,
-            amountCents: monthly.totalAmountCents,
-            transactionRef,
-          });
-          results.push({ childId, ok: true, kind: 'MONTHLY_INSTALLMENT' });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          results.push({ childId, ok: false, message: msg });
-        }
-        continue;
-      }
-
-      results.push({
-        childId,
-        ok: false,
-        message: 'Aucune échéance impayée pour cet élève.',
-      });
-    }
-
-    const anyOk = results.some((r) => r.ok);
-    if (!anyOk) {
-      const firstMsg = results.find((r) => r.message)?.message ?? 'Aucun paiement enregistré.';
-      throw new BadRequestException(firstMsg);
-    }
+    const channel = String(body?.channel ?? '').trim().toLowerCase() || 'online';
 
     return {
       channel,
       phone,
       recordedAt: new Date().toISOString(),
-      results,
+      results: [
+        {
+          childId: String(applied.childId ?? ''),
+          ok: true,
+          kind: applied.kind,
+        },
+      ],
     };
   }
 

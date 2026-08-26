@@ -7,6 +7,7 @@ import * as nodemailer from 'nodemailer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { readSchoolContact } from '../config/school-contact';
+import { adminPortalLoginUrl, parentPortalLoginUrl } from '../config/public-urls';
 import {
   buildAdministrativeEmailHtml,
   buildAdministrativeEmailText,
@@ -17,9 +18,7 @@ import {
 } from './mail-layout';
 
 function loginUrlFromConfig(config: ConfigService): string {
-  return (
-    config.get<string>('PARENT_PORTAL_LOGIN_URL')?.trim() || 'http://localhost:3000/parent/login'
-  );
+  return parentPortalLoginUrl(config);
 }
 
 function plainTextToMailHtml(text: string): string {
@@ -101,21 +100,8 @@ function parentCredentialsFooterHtml(
   return `<p style="margin:0;">Identifiant espace parent : <strong>${escapeHtml(to)}</strong></p>`;
 }
 
-function inscriptionResumeUrlFromConfig(config: ConfigService, resumeToken: string): string {
-  const explicit = config.get<string>('PUBLIC_INSCRIPTION_URL')?.trim();
-  if (explicit) {
-    const base = explicit.replace(/\/$/, '');
-    return `${base}?resume=${encodeURIComponent(resumeToken)}`;
-  }
-  const login = loginUrlFromConfig(config);
-  const site = login.replace(/\/parent\/login\/?$/i, '') || 'http://localhost:3000';
-  return `${site.replace(/\/$/, '')}/inscription?resume=${encodeURIComponent(resumeToken)}`;
-}
-
 function adminLoginUrlFromConfig(config: ConfigService): string {
-  return (
-    config.get<string>('ADMIN_PORTAL_LOGIN_URL')?.trim() || 'http://localhost:3000/admin/login'
-  );
+  return adminPortalLoginUrl(config);
 }
 
 export type PreEnrollmentMailParams = {

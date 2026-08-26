@@ -47,8 +47,11 @@ export function formatPaymentModeFromTransactionRef(ref: string | null | undefin
   if (u.includes('WAVE')) return 'Wave';
   if (u.includes('ORANGE')) return 'Orange Money';
   if (u.includes('WIZALL')) return 'Wizall';
+  if (u.includes('MTN')) return 'MTN Money';
+  if (u.includes('MOOV')) return 'Moov Money';
   if (u.includes('WESTERN')) return 'Western Union';
   if (u.includes('VIREMENT')) return 'Virement bancaire';
+  if (u.startsWith('PAYDUNYA-')) return 'Paiement en ligne';
   if (u.startsWith('SIM-')) return 'Paiement en ligne (simulation)';
   return 'Paiement enregistré';
 }

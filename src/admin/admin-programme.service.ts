@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ProgramEventStatus, SchoolYearStatus, UserRole } from '@prisma/client';
+import { Prisma, ProgramEventStatus, SchoolYearStatus, UserRole, EnrollmentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 const DAY_ABBR_FR = ['DIM', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'] as const;
@@ -300,6 +300,66 @@ export class AdminProgrammeService {
       categories,
       stats: {
         total: rows.length,
+        upcoming,
+        inProgress,
+        completed,
+      },
+      groups,
+      items,
+    };
+  }
+
+  /** Vue parent : uniquement les événements des niveaux de ses enfants (+ événements sans niveau = toute l’école). */
+  async getParentOverview(parentId: string) {
+    const overview = await this.getOverview({});
+    const schoolYear = overview.schoolYear;
+
+    const enrollmentsWhere = {
+      child: { parentId },
+      status: { in: [EnrollmentStatus.APPROVED, EnrollmentStatus.PENDING] },
+    };
+    let enrollments = await this.prisma.enrollment.findMany({
+      where: { ...enrollmentsWhere, schoolYear },
+      select: { levelId: true },
+    });
+    if (!enrollments.length) {
+      enrollments = await this.prisma.enrollment.findMany({
+        where: enrollmentsWhere,
+        select: { levelId: true },
+      });
+    }
+    const parentLevelIds = new Set(enrollments.map((e) => e.levelId));
+
+    const items = overview.items.filter((item) => {
+      if (!item.levelIds.length) return true;
+      return item.levelIds.some((id) => parentLevelIds.has(id));
+    });
+
+    let upcoming = 0;
+    let inProgress = 0;
+    let completed = 0;
+    const groupsMap = new Map<string, typeof items>();
+    for (const item of items) {
+      if (item.status === ProgramEventStatus.PLANNED) upcoming++;
+      else if (item.status === ProgramEventStatus.IN_PROGRESS) inProgress++;
+      else completed++;
+      const list = groupsMap.get(item.monthKey) ?? [];
+      list.push(item);
+      groupsMap.set(item.monthKey, list);
+    }
+    const groups = [...groupsMap.entries()].map(([monthLabel, events]) => ({
+      monthLabel,
+      events,
+    }));
+
+    const usedCategoryIds = new Set(items.map((i) => i.categoryId));
+    const categories = overview.categories.filter((c) => c.active && usedCategoryIds.has(c.id));
+
+    return {
+      schoolYear,
+      categories,
+      stats: {
+        total: items.length,
         upcoming,
         inProgress,
         completed,

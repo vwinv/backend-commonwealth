@@ -69,5 +69,6 @@ import { AdminDataService } from './admin-data.service';
     AdminUsersService,
     AdminDataService,
   ],
+  exports: [AdminProgrammeService],
 })
 export class AdminModule {}

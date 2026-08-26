@@ -37,6 +37,16 @@ export class AdminSettingsController {
     return this.settings.openSchoolYear(id);
   }
 
+  @Get('school-years/:id/deletion-impact')
+  schoolYearDeletionImpact(@Param('id') id: string) {
+    return this.settings.getSchoolYearDeletionImpact(id);
+  }
+
+  @Delete('school-years/:id')
+  deleteSchoolYear(@Param('id') id: string) {
+    return this.settings.deleteSchoolYear(id);
+  }
+
   /** Niveaux seuls (ordre d’affichage), sans exiger une année scolaire ouverte. */
   @Get('levels')
   listLevelsForSelect() {
@@ -96,6 +106,11 @@ export class AdminSettingsController {
   @Patch('levels/:levelId')
   updateLevel(@Param('levelId') levelId: string, @Body() body: Record<string, unknown>) {
     return this.settings.updateLevel(levelId, body);
+  }
+
+  @Delete('levels/:levelId')
+  deleteLevel(@Param('levelId') levelId: string) {
+    return this.settings.deleteLevel(levelId);
   }
 
   @Get('levels/:levelId/schedules')
